@@ -828,9 +828,8 @@ pub fn vault_related(
         if buf.len() != dim * 4 {
             continue;
         }
-        for (i, chunk) in buf.chunks_exact(4).enumerate() {
-            let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            sum[i] += v;
+        for (i, chunk) in buf.as_chunks::<4>().0.iter().enumerate() {
+            sum[i] += f32::from_le_bytes(*chunk);
         }
         count += 1;
     }
