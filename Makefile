@@ -1,7 +1,20 @@
 CARGO_MANIFEST := Cargo.toml
 TAURI_CONF := crates/rezon-web/tauri.conf.json
 
-.PHONY: help install dev build build-tui build-tui-release run-tui run-tui-release \
+# The DMG bundler styles its Finder window by driving Finder over Apple
+# events, which needs Automation permission the terminal usually does not
+# have -- it dies with "Not authorized to send Apple events to Finder.
+# (-1743)". Tauri passes bundle_dmg.sh --skip-jenkins whenever CI is set,
+# which skips the styling and yields a plain but fully functional image.
+# Grant the terminal Automation access to Finder under System Settings >
+# Privacy & Security > Automation and run `make dmg DMG_STYLE=1` to get
+# the styled window back.
+#
+# Scoped to the `dmg` target alone so a plain `make build` neither needs
+# the permission nor leaks CI=true into the frontend build.
+DMG_ENV := $(if $(DMG_STYLE),,CI=true)
+
+.PHONY: help install dev build dmg build-tui build-tui-release run-tui run-tui-release \
 		web-dev web-build typecheck check fmt fmt-check lint test ci clean
 
 help:
@@ -13,8 +26,14 @@ install: ## Install JS deps
 dev: ## Run Tauri app in dev mode
 	@bun run tauri dev --config $(TAURI_CONF)
 
-build: ## Build Tauri app for release
-	@bun run tauri build --config $(TAURI_CONF)
+build: ## Build Rezon.app for release
+	@bun run tauri build --config $(TAURI_CONF) --bundles app
+
+# Asks for `app` alongside `dmg` deliberately. With `--bundles dmg` alone
+# Tauri treats Rezon.app as a disposable intermediate and deletes it on
+# the way out, so `make build && make dmg` would leave no .app behind.
+dmg: ## Build the release DMG (DMG_STYLE=1 keeps DMG window styling)
+	@$(DMG_ENV) bun run tauri build --config $(TAURI_CONF) --bundles app,dmg
 
 build-tui: ## build tui (debug)
 	@cargo build -p rezon-tui

@@ -19,7 +19,19 @@ futures = "0.3"
 # rather than the Tauri shell so `rezon-tui` gets the same store —
 # key resolution is backend policy, not a GUI concern.
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-sync-persistent"] }
-llama-cpp-2 = { version = "0.1.146", features = ["metal"] }
+# Pinned, not merely floating. 0.1.147 deleted `llama_cpp_2::openai`
+# and the `wrapper_oai` C++ shim behind it, which is what `llm.rs` uses
+# for OAI-compatible chat templating and streaming tool-call parsing.
+# Nothing in later releases replaces it, so local-model tool calling
+# does not build past 0.1.146.
+#
+# The `=` on the -sys crate is load-bearing. llama-cpp-2 0.1.146 asks
+# for `llama-cpp-sys-2 = "0.1.146"`, a caret range that happily
+# resolves to 0.1.154 -- whose FFI no longer defines the
+# `llama_rs_*_oaicompat` symbols 0.1.146 calls. Without this pin a bare
+# `cargo update` yields a version pair that cannot link.
+llama-cpp-2 = { version = "=0.1.146", features = ["metal"] }
+llama-cpp-sys-2 = "=0.1.146"
 notify = "6"
 # `stream` powers web_fetch's incremental body read, which stops at the
 # size cap instead of buffering the whole response first.
