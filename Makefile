@@ -2,7 +2,7 @@ CARGO_MANIFEST := Cargo.toml
 TAURI_CONF := crates/rezon-web/tauri.conf.json
 
 .PHONY: help install dev build build-tui build-tui-release run-tui run-tui-release \
-		web-dev web-build check fmt fmt-check lint test clean
+		web-dev web-build typecheck check fmt fmt-check lint test ci clean
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-14s %s\n", $$1, $$2}'
@@ -46,9 +46,18 @@ fmt-check: ## Verify Rust formatting (workspace)
 lint: ## Clippy with warnings as errors (workspace)
 	@cargo clippy --workspace --all-targets -- -D warnings
 
-test: ## Run Rust tests + clippy (workspace, warnings = errors)
+test: ## Rust gate: fmt-check + tests + clippy (warnings = errors)
+	@cargo fmt --all -- --check
 	@cargo test --workspace
 	@cargo clippy --workspace --all-targets -- -D warnings
+
+typecheck: ## Typecheck the frontend (needs `make install` first)
+	@bunx tsc --noEmit
+
+ci: ## Everything CI runs: Rust gate + frontend typecheck + frontend build
+	@$(MAKE) test
+	@$(MAKE) typecheck
+	@$(MAKE) web-build
 
 clean: ## Remove build artifacts
 	@rm -rf node_modules dist target crates/rezon-web/target

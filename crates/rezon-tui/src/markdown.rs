@@ -524,7 +524,10 @@ mod tests {
         assert!(out.contains("the docs"));
         assert!(out.contains("https://example.com"));
         // The raw markdown `[]()` syntax should not survive.
-        assert!(!out.contains("](http"), "raw bracket-paren must be consumed: {out:?}");
+        assert!(
+            !out.contains("](http"),
+            "raw bracket-paren must be consumed: {out:?}"
+        );
     }
 
     #[test]
@@ -554,7 +557,10 @@ mod tests {
         assert!(out.contains('│'));
         assert!(out.contains('─'));
         // Original pipes shouldn't leak.
-        assert!(!out.contains(" | "), "raw pipes should be replaced: {out:?}");
+        assert!(
+            !out.contains(" | "),
+            "raw pipes should be replaced: {out:?}"
+        );
     }
 
     #[test]

@@ -7,7 +7,6 @@
 //   - llama-cpp-2's `apply_chat_template_with_tools_oaicompat`
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -65,8 +64,6 @@ pub trait Tool: Send + Sync {
 /// `ctx.cancel` for long-running operations and abort promptly.
 pub struct ToolContext {
     pub cancel: Arc<AtomicBool>,
-    /// Optional working directory the agent run is rooted in.
-    pub workdir: Option<PathBuf>,
 }
 
 /// Reasons a tool dispatch can fail. The agent loop maps each variant
@@ -77,14 +74,6 @@ pub enum ToolError {
     /// Arguments did not match the tool's schema.
     #[error("argument: {0}")]
     Argument(String),
-
-    /// User rejected the confirmation prompt.
-    #[error("denied by user")]
-    Denied,
-
-    /// Run was cancelled.
-    #[error("cancelled")]
-    Cancelled,
 
     /// Tool raised an error during execution.
     #[error("runtime: {0}")]
@@ -104,17 +93,6 @@ pub struct ToolCall {
     /// dispatch implementation; keeping it as a string avoids losing
     /// information when the model emits invalid JSON.
     pub arguments: String,
-}
-
-/// Result of dispatching a single tool call. Persisted alongside the
-/// assistant turn (per decision #1) so users can expand the pill in
-/// the UI to see the full result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolResult {
-    pub tool_call_id: String,
-    /// JSON value or { "error": "..." } envelope on failure.
-    pub content: Value,
-    pub ok: bool,
 }
 
 /// Set of tools available for an agent run. Per decision #2 there is

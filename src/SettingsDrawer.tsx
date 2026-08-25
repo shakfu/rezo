@@ -340,6 +340,17 @@ function ToolsPanel({
                     value={current}
                     onChange={(v) => setPermission(t.name, v)}
                     disabled={!settings.toolsEnabled}
+                    // A tool that declares `requires_confirmation()`
+                    // cannot be auto-approved from this map — the
+                    // backend ignores "always" for it and prompts
+                    // anyway. Grey the option out instead of offering
+                    // a setting that does nothing.
+                    unavailable={t.requiresConfirmation ? ["always"] : []}
+                    unavailableTitle={
+                      "This tool has side effects, so it always prompts. " +
+                      "Use \u201cAlways allow\u201d in the confirmation dialog " +
+                      "to grant it for this session."
+                    }
                   />
                 </div>
               );
@@ -350,6 +361,11 @@ function ToolsPanel({
           <strong>Ask</strong> prompts before each call.{" "}
           <strong>Always</strong> dispatches without prompting.{" "}
           <strong>Disable</strong> hides the tool from the model entirely.
+          <br />
+          Tools with side effects (shell, file and note writes, network
+          fetches) always prompt regardless of this setting. To stop being
+          asked for one, use &ldquo;Always allow&rdquo; in the confirmation
+          dialog; that grant lasts until rezon restarts.
         </small>
       </div>
     </>
@@ -369,20 +385,28 @@ function PermissionToggle({
   value,
   onChange,
   disabled,
+  unavailable,
+  unavailableTitle,
 }: {
   value: ToolPermission;
   onChange: (v: ToolPermission) => void;
   disabled?: boolean;
+  /// Options the backend will not honor from this map, greyed out
+  /// rather than silently ignored.
+  unavailable?: ToolPermission[];
+  unavailableTitle?: string;
 }) {
   return (
     <div className="inline-flex shrink-0 overflow-hidden rounded-md border border-border-soft">
       {PERMISSION_OPTIONS.map((o, i) => {
         const active = value === o.v;
+        const blocked = unavailable?.includes(o.v) ?? false;
         return (
           <button
             key={o.v}
             type="button"
-            disabled={disabled}
+            disabled={disabled || blocked}
+            title={blocked ? unavailableTitle : undefined}
             onClick={() => onChange(o.v)}
             className={[
               "cursor-pointer border-none px-2 py-1 text-[11px]",
@@ -390,7 +414,7 @@ function PermissionToggle({
               active
                 ? "bg-accent text-white"
                 : "bg-transparent text-fg-dim hover:bg-bg-soft hover:text-fg",
-              disabled ? "cursor-not-allowed opacity-60" : "",
+              disabled || blocked ? "cursor-not-allowed opacity-60" : "",
             ].join(" ")}
           >
             {o.label}

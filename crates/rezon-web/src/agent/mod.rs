@@ -12,5 +12,5 @@ pub use rezon_core::agent::{
     cloud, confirm, delta, event, local, loop_, message, provider, run_agent, tool, tools,
     AgentDelta, AgentEvent, AgentOpts, AgentOutcome, ChatMessage, EventSink, FinishReason,
     LocalProvider, LogEventSink, Provider, ProviderOpts, StreamStats, Tool, ToolCall, ToolContext,
-    ToolError, ToolRegistry, ToolResult,
+    ToolError, ToolRegistry,
 };

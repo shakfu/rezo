@@ -418,9 +418,9 @@ impl Repl {
             // send the message. The original `[[X]]` stays in place
             // so the user can see what didn't resolve.
             let list = r.unresolved.join(", ");
-            let _ = self.ui_tx.send(UiEvent::Error(format!(
-                "wikilink unresolved: {list}"
-            )));
+            let _ = self
+                .ui_tx
+                .send(UiEvent::Error(format!("wikilink unresolved: {list}")));
         }
         r.text
     }
@@ -601,14 +601,20 @@ impl Repl {
             "agent" => {
                 self.store.active_mut().settings.agent_mode = Some(true);
                 self.save_ignore_err();
-                println!("{meta}agent mode on (for this conversation){reset}",
-                         meta = C_META, reset = C_RESET);
+                println!(
+                    "{meta}agent mode on (for this conversation){reset}",
+                    meta = C_META,
+                    reset = C_RESET
+                );
             }
             "chat" => {
                 self.store.active_mut().settings.agent_mode = Some(false);
                 self.save_ignore_err();
-                println!("{meta}chat mode (for this conversation){reset}",
-                         meta = C_META, reset = C_RESET);
+                println!(
+                    "{meta}chat mode (for this conversation){reset}",
+                    meta = C_META,
+                    reset = C_RESET
+                );
             }
             "thinking" => self.cmd_thinking(args),
             "model" => self.cmd_model(args).await,
@@ -630,7 +636,7 @@ impl Repl {
             "export" => self.cmd_export(args),
             "import" => self.cmd_import(args),
             "fork" => self.cmd_fork(),
-            "models" => self.cmd_models(args),
+            "models" => self.cmd_models(args).await,
             "setup" => self.cmd_setup(),
             "undo" => self.cmd_undo(),
             "redo" => self.cmd_redo(),
@@ -660,16 +666,19 @@ impl Repl {
         help_row("/next /prev", "cycle conversations");
         help_row("/rename <title>", "rename current conversation");
         help_row("/delete", "delete current conversation");
-        help_row(
-            "/agent /chat",
-            "toggle agent loop (per conversation)",
-        );
+        help_row("/agent /chat", "toggle agent loop (per conversation)");
         help_row(
             "/thinking on|off|toggle",
             "show / hide agent reasoning (per conversation)",
         );
-        help_row("/model [name]", "picker over current provider's models (no arg) or set by name");
-        help_row("/provider [key]", "picker over providers (no arg) or set by key");
+        help_row(
+            "/model [name]",
+            "picker over current provider's models (no arg) or set by name",
+        );
+        help_row(
+            "/provider [key]",
+            "picker over providers (no arg) or set by key",
+        );
         help_row(
             "/max-steps <n>",
             &format!("agent step cap (current: {})", self.max_steps),
@@ -684,9 +693,15 @@ impl Repl {
         help_row("/export <path>", "write the active conversation to JSON");
         help_row("/import <path>", "load a JSON conversation as a new entry");
         help_row("/fork", "duplicate the active conversation");
-        help_row("/models [provider]", "list models for current provider (or named provider)");
+        help_row(
+            "/models [provider] [--refresh]",
+            "list models for current provider; --refresh re-fetches the provider's own list",
+        );
         help_row("/setup", "re-run the first-launch configuration wizard");
-        help_row("/undo", "revert the most recent vault edit (journal-backed)");
+        help_row(
+            "/undo",
+            "revert the most recent vault edit (journal-backed)",
+        );
         help_row("/redo", "reapply the most recent vault undo");
         help_row("/tools", "list tools (✓ enabled · · disabled)");
         help_row(
@@ -763,7 +778,11 @@ impl Repl {
                 .map(|&i| {
                     let c = &self.store.conversations[i];
                     let active = if i == self.store.active { "* " } else { "  " };
-                    format!("{active}{title}  {hint}", title = c.title, hint = conv_hint(c))
+                    format!(
+                        "{active}{title}  {hint}",
+                        title = c.title,
+                        hint = conv_hint(c)
+                    )
                 })
                 .collect();
             if let Some(picked) = crate::picker::pick(items, "conv ", "") {
@@ -1005,8 +1024,11 @@ impl Repl {
                 .map(|(k, l)| {
                     let active = k == &current;
                     let marker = if active { "* " } else { "  " };
-                    format!("{marker}{k}  {meta}({l}){reset}",
-                        meta = C_META, reset = C_RESET)
+                    format!(
+                        "{marker}{k}  {meta}({l}){reset}",
+                        meta = C_META,
+                        reset = C_RESET
+                    )
                 })
                 .collect();
             if let Some(picked) = crate::picker::pick(items, "provider ", "") {
@@ -1297,12 +1319,8 @@ impl Repl {
                         // The snippet is short by design; collapse
                         // any embedded newlines so the picker row
                         // stays on one terminal line.
-                        let snippet: String = h
-                            .snippet
-                            .replace('\n', " ")
-                            .chars()
-                            .take(120)
-                            .collect();
+                        let snippet: String =
+                            h.snippet.replace('\n', " ").chars().take(120).collect();
                         candidates.push(Candidate {
                             display: format!("{role_label} · {snippet}  ({})", conv.title),
                             conv_idx: ci,
@@ -1746,15 +1764,25 @@ impl Repl {
         );
     }
 
-    fn cmd_models(&self, args: &str) {
+    async fn cmd_models(&self, args: &str) {
         // `/models` defaults to the *current* provider — it's a
         // listing command, not a switcher. Pass `/models <key>` (or
         // `/models local`) to look at a different provider's catalog
-        // without changing the active one.
-        let provider_key = if args.is_empty() {
+        // without changing the active one. `--refresh` forces a fetch
+        // of the provider's own list past its cache TTL.
+        let mut refresh = false;
+        let mut rest: Vec<&str> = Vec::new();
+        for tok in args.split_whitespace() {
+            if tok == "--refresh" || tok == "-r" {
+                refresh = true;
+            } else {
+                rest.push(tok);
+            }
+        }
+        let provider_key = if rest.is_empty() {
             self.effective_chat_opts().provider
         } else {
-            args.to_string()
+            rest.join(" ")
         };
         if provider_key == "local" {
             let dir = effective_models_dir(&self.store);
@@ -1842,7 +1870,81 @@ impl Repl {
             println!("  {marker} {m}{suffix}");
         }
         if def.recommended_models.is_empty() {
-            println!("  {meta}(no recommended list){reset}", meta = C_META, reset = C_RESET);
+            println!(
+                "  {meta}(no recommended list){reset}",
+                meta = C_META,
+                reset = C_RESET
+            );
+        }
+        self.print_fetched_models(def, refresh).await;
+    }
+
+    /// Append the provider's own `/v1/models` list beneath the curated
+    /// one. Quiet on failure: the recommended list above is already a
+    /// working answer and the model field accepts free text, so an
+    /// unreachable endpoint is a non-event.
+    async fn print_fetched_models(&self, def: &rezon_core::llm::CloudProviderDef, refresh: bool) {
+        use rezon_core::model_catalog as mc;
+
+        if def.user_configurable || def.base_url.is_empty() {
+            return;
+        }
+        let api_key = rezon_core::llm::lookup_api_key(
+            &def.key,
+            &def.env_var,
+            None,
+            &rezon_core::secrets::KeyringStore,
+        )
+        .map(|(k, _)| k);
+        if api_key.is_none() {
+            return;
+        }
+        let Some(path) = mc::cache_path() else {
+            return;
+        };
+        let cat = mc::resolve_catalog(
+            &def.key,
+            &def.base_url,
+            api_key.as_deref(),
+            &def.recommended_models,
+            &path,
+            refresh,
+            mc::DEFAULT_TTL_SECS,
+        )
+        .await;
+        if cat.fetched.is_empty() {
+            if let Some(e) = cat.error {
+                println!(
+                    "  {meta}(provider list unavailable: {e}){reset}",
+                    meta = C_META,
+                    reset = C_RESET
+                );
+            }
+            return;
+        }
+        let note = match cat.source {
+            mc::CatalogSource::StaleCache => " (cached; refresh failed)",
+            mc::CatalogSource::Cache => " (cached)",
+            _ => "",
+        };
+        println!(
+            "  {meta}— {} more from provider{note}{reset}",
+            cat.fetched.len(),
+            meta = C_META,
+            reset = C_RESET
+        );
+        let current = self.effective_chat_opts().model;
+        for m in &cat.fetched {
+            let marker = if current.as_deref() == Some(m.as_str()) {
+                format!("{C_APP}*{C_APP:#}")
+            } else {
+                " ".to_string()
+            };
+            println!(
+                "  {marker} {meta}{m}{reset}",
+                meta = C_META,
+                reset = C_RESET
+            );
         }
     }
 
@@ -1871,7 +1973,11 @@ impl Repl {
                     &vault,
                     &abs.to_string_lossy(),
                 );
-                let git_suffix = if out.journal.git_committed { " (git committed)" } else { "" };
+                let git_suffix = if out.journal.git_committed {
+                    " (git committed)"
+                } else {
+                    ""
+                };
                 println!(
                     "{meta}undid {tool} on {path}{git}{reset}",
                     meta = C_META,
@@ -1881,7 +1987,11 @@ impl Repl {
                     git = git_suffix,
                 );
                 if let Some(w) = out.journal.git_warning {
-                    println!("{meta}  git warning: {w}{reset}", meta = C_META, reset = C_RESET);
+                    println!(
+                        "{meta}  git warning: {w}{reset}",
+                        meta = C_META,
+                        reset = C_RESET
+                    );
                 }
             }
             Err(e) => println!("{err}/undo: {e}{reset}", err = C_ERR, reset = C_RESET),
@@ -1910,7 +2020,11 @@ impl Repl {
                     &vault,
                     &abs.to_string_lossy(),
                 );
-                let git_suffix = if out.journal.git_committed { " (git committed)" } else { "" };
+                let git_suffix = if out.journal.git_committed {
+                    " (git committed)"
+                } else {
+                    ""
+                };
                 println!(
                     "{meta}redid {path}{git}{reset}",
                     meta = C_META,
@@ -1919,7 +2033,11 @@ impl Repl {
                     git = git_suffix,
                 );
                 if let Some(w) = out.journal.git_warning {
-                    println!("{meta}  git warning: {w}{reset}", meta = C_META, reset = C_RESET);
+                    println!(
+                        "{meta}  git warning: {w}{reset}",
+                        meta = C_META,
+                        reset = C_RESET
+                    );
                 }
             }
             Err(e) => println!("{err}/redo: {e}{reset}", err = C_ERR, reset = C_RESET),
@@ -2247,7 +2365,11 @@ async fn prompt_yes_no(name: &str, arguments: &str, preview: Option<&str>) -> bo
     // without scanning past the body.
     let body = match preview {
         Some(p) => colorize_diff(p),
-        None => format!("{dim}with args{reset} {arguments}", dim = C_DIM, reset = C_RESET),
+        None => format!(
+            "{dim}with args{reset} {arguments}",
+            dim = C_DIM,
+            reset = C_RESET
+        ),
     };
     let prompt = format!(
         "{tool}approve tool{reset} {bold}{name}{reset}\n{body}\n{user}[y/N] > ",

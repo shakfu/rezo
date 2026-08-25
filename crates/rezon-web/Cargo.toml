@@ -1,9 +1,10 @@
 [package]
 name = "rezon"
-version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
-edition = "2021"
+version.workspace = true
+description = "rezon desktop app (Tauri shell over rezon-core)"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -28,13 +29,6 @@ anyhow = "1.0.102"
 tokio = { version = "1.52.2", features = ["sync", "process", "io-util", "time", "macros"] }
 # `async_trait` is used by the Tauri-side `ConfirmationGate` impl.
 async-trait = "0.1"
-# OS-native credential storage for cloud API keys (`Other` provider
-# in particular — the named providers consume their env-var keys).
-# macOS Keychain on Darwin, Credential Manager on Windows,
-# secret-service on Linux. `apple-native` skips the keyring crate's
-# own portable backend for the macOS path so the Keychain dialog
-# matches the system look.
-keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-sync-persistent"] }
 
 [dev-dependencies]
 # Examples (examples/react_agent.rs, local_tool_spike.rs, agent_e2e.rs) use

@@ -108,7 +108,10 @@ fn normalize_rel(input: &str) -> Result<String, ToolError> {
     let p = Path::new(&s);
     let needs_ext = p.extension().is_none()
         || !matches!(
-            p.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref(),
+            p.extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_lowercase)
+                .as_deref(),
             Some("md") | Some("markdown"),
         );
     if needs_ext {
@@ -131,8 +134,7 @@ mod tests {
         // path indirectly via `vault_index_open`. For the unit tests
         // here we don't need the FTS index, just a known active
         // vault, which we install by opening it.
-        crate::search::vault_index_open(&state, vault)
-            .expect("open vault index");
+        crate::search::vault_index_open(&state, vault).expect("open vault index");
         ReadNote::new(Arc::new(state))
     }
 
@@ -145,7 +147,6 @@ mod tests {
         let tool = make_tool(&vault);
         let ctx = ToolContext {
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            workdir: None,
         };
         let out = tool
             .dispatch(json!({ "path": "Skills/Researcher" }), &ctx)
@@ -162,7 +163,6 @@ mod tests {
         let tool = make_tool(&vault);
         let ctx = ToolContext {
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            workdir: None,
         };
         let err = tool
             .dispatch(json!({ "path": "Nope" }), &ctx)

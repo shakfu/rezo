@@ -1,68 +1,32 @@
-// Secrets storage backed by the OS-native credential store
-// (Keychain / Credential Manager / secret-service via the `keyring`
-// crate). Used today for the user-configurable "Other" provider's
-// API key, which previously lived only in React state and didn't
-// survive a restart. The Tauri command surface is generic over
-// `account`, so future secrets (extra cloud-provider overrides,
-// future agent-tool credentials, etc.) can use the same plumbing
-// without touching this file.
+// Tauri command wrappers over `rezon_core::secrets`.
 //
-// Service identifier is `rezon-tui` to match the existing
-// ProjectDirs application id; namespaces our entries away from any
-// other app a user has on their machine. The keyring's `service`
-// + `user` (account) pair is a primary key — different `account`
-// values are independent slots in the same service.
+// The store itself lives in core so `rezon-tui` shares it and so key
+// *resolution* (runtime -> keychain -> environment) is one policy in
+// one place. This file is only the IPC surface.
+//
+// Note what is deliberately absent: there is no command that returns a
+// stored key. The frontend can set one and ask whether one exists, but
+// never reads the value back. A key the webview never holds is a key
+// that cannot leak through devtools, a content-injection bug, or an
+// IPC payload — and nothing in the UI needs the plaintext.
 
-use keyring::Entry;
+use rezon_core::secrets;
 
-/// Service identifier passed to `keyring::Entry::new`. Stable
-/// across versions — changing it would orphan every previously-
-/// saved secret.
-const SERVICE: &str = "rezon-tui";
-
-/// Read a secret. Returns `Ok(None)` when no entry exists for the
-/// account (the keyring crate signals this via `NoEntry`), and an
-/// error string for unexpected failures (corrupt store, denied
-/// access). Callers should treat `None` as "the user hasn't saved
-/// one yet."
-#[tauri::command]
-pub fn keychain_get(account: String) -> Result<Option<String>, String> {
-    let entry = Entry::new(SERVICE, &account).map_err(|e| format!("keyring: {e}"))?;
-    match entry.get_password() {
-        Ok(s) => Ok(Some(s)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(format!("keyring get {account}: {e}")),
-    }
-}
-
-/// Write (or overwrite) a secret. Empty values are treated as a
-/// delete so the UI doesn't have to thread a separate "clear" code
-/// path — typing into the field and erasing it intuitively removes
-/// the saved value.
+/// Write (or, with an empty value, delete) a secret.
 #[tauri::command]
 pub fn keychain_set(account: String, value: String) -> Result<(), String> {
-    let entry = Entry::new(SERVICE, &account).map_err(|e| format!("keyring: {e}"))?;
-    if value.is_empty() {
-        // `delete_credential` errors with NoEntry when there's
-        // nothing to delete; surface as Ok(()) so the caller's
-        // happy path doesn't have to distinguish.
-        return match entry.delete_credential() {
-            Ok(_) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(format!("keyring delete {account}: {e}")),
-        };
-    }
-    entry
-        .set_password(&value)
-        .map_err(|e| format!("keyring set {account}: {e}"))
+    secrets::keyring_set(&account, &value)
 }
 
-/// Explicit delete. Idempotent on missing entries (same NoEntry-as-
-/// success behaviour as the empty-set path).
+/// Explicit delete. Idempotent on a missing entry.
 #[tauri::command]
 pub fn keychain_delete(account: String) -> Result<(), String> {
-    let entry = Entry::new(SERVICE, &account).map_err(|e| format!("keyring: {e}"))?;
-    match entry.delete_credential() {
-        Ok(_) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(format!("keyring delete {account}: {e}")),
-    }
+    secrets::keyring_delete(&account)
+}
+
+/// Whether a secret exists, without revealing it. This replaced a
+/// `keychain_get` that handed the plaintext to the webview.
+#[tauri::command]
+pub fn keychain_has(account: String) -> Result<bool, String> {
+    secrets::keyring_get(&account).map(|v| v.is_some())
 }

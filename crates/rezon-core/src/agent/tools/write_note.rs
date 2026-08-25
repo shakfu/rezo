@@ -96,7 +96,10 @@ impl Tool for WriteNote {
     fn preview(&self, args: &Value) -> Option<String> {
         let path = args.get("path")?.as_str()?;
         let content = args.get("content")?.as_str()?;
-        let overwrite = args.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
+        let overwrite = args
+            .get("overwrite")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let rel = normalize_rel(path).ok()?;
         let header = if overwrite {
             format!("write_note  {rel}  (overwrite)")
@@ -118,9 +121,7 @@ impl Tool for WriteNote {
             .map_err(|e| ToolError::Argument(format!("invalid args: {e}")))?;
 
         let vault = self.search.active_vault().ok_or_else(|| {
-            ToolError::Argument(
-                "no vault is open — ask the user to open a vault first".into(),
-            )
+            ToolError::Argument("no vault is open — ask the user to open a vault first".into())
         })?;
 
         let rel = normalize_rel(&args.path)?;
@@ -206,7 +207,10 @@ fn normalize_rel(input: &str) -> Result<String, ToolError> {
     let p = Path::new(&s);
     let needs_ext = p.extension().is_none()
         || !matches!(
-            p.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref(),
+            p.extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_lowercase)
+                .as_deref(),
             Some("md") | Some("markdown"),
         );
     if needs_ext {
@@ -219,7 +223,8 @@ fn normalize_rel(input: &str) -> Result<String, ToolError> {
 /// lines, truncated past `PREVIEW_MAX_LINES` with a note about how
 /// many were elided.
 fn render_preview(header: &str, body_lines: &[String]) -> String {
-    let mut out = String::with_capacity(header.len() + body_lines.iter().map(|s| s.len() + 1).sum::<usize>());
+    let mut out =
+        String::with_capacity(header.len() + body_lines.iter().map(|s| s.len() + 1).sum::<usize>());
     out.push_str(header);
     out.push('\n');
     let take = body_lines.len().min(PREVIEW_MAX_LINES);
@@ -229,7 +234,10 @@ fn render_preview(header: &str, body_lines: &[String]) -> String {
     }
     if body_lines.len() > take {
         let elided = body_lines.len() - take;
-        out.push_str(&format!("  … {elided} more line{}", if elided == 1 { "" } else { "s" }));
+        out.push_str(&format!(
+            "  … {elided} more line{}",
+            if elided == 1 { "" } else { "s" }
+        ));
     }
     out
 }
@@ -494,9 +502,7 @@ impl Tool for EditNote {
 
         let matches = body.matches(&args.find).count();
         if matches == 0 {
-            return Err(ToolError::Argument(format!(
-                "`find` not present in {rel}"
-            )));
+            return Err(ToolError::Argument(format!("`find` not present in {rel}")));
         }
         if matches > 1 {
             return Err(ToolError::Argument(format!(
@@ -568,7 +574,10 @@ impl Tool for UndoNote {
         let target = journal::last_undoable(&vault).ok().flatten()?;
         let header = format!("undo_note  {}", target.path);
         let body = match &target.op {
-            journal::Op::Write { before_sha, after_sha } => {
+            journal::Op::Write {
+                before_sha,
+                after_sha,
+            } => {
                 let mut lines: Vec<String> = Vec::new();
                 if let Some(s) = after_sha {
                     if let Ok(bytes) = journal::read_blob(&vault, s) {
@@ -628,7 +637,10 @@ mod tests {
 
     #[test]
     fn normalize_rel_appends_md_extension() {
-        assert_eq!(normalize_rel("Skills/Researcher").unwrap(), "Skills/Researcher.md");
+        assert_eq!(
+            normalize_rel("Skills/Researcher").unwrap(),
+            "Skills/Researcher.md"
+        );
     }
 
     #[test]

@@ -96,8 +96,19 @@ pub fn spawn_agent_run(
     let registry = Arc::new(reg.without(disabled_tools));
 
     let sink: Arc<dyn rezon_core::agent::EventSink> = Arc::new(TuiAgentSink::new(tx.clone()));
-    let gate: Arc<dyn ConfirmationGate> =
-        Arc::new(TuiConfirmationGate::new(tx.clone(), cancel.clone()));
+    // Each tool's own confirmation requirement, so the gate can skip
+    // prompting for read-only tools instead of interrupting on every
+    // call.
+    let confirm_required: std::collections::HashMap<String, bool> = registry
+        .tools()
+        .map(|t| (t.name().to_string(), t.requires_confirmation()))
+        .collect();
+    let gate: Arc<dyn ConfirmationGate> = Arc::new(TuiConfirmationGate::new(
+        tx.clone(),
+        cancel.clone(),
+        confirm_required,
+        disabled_tools.to_vec(),
+    ));
 
     let opts = AgentOpts {
         provider_opts: ProviderOpts {

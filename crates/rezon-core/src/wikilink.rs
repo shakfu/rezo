@@ -90,11 +90,15 @@ pub fn expand(vault: &str, text: &str) -> ExpandResult {
     // breadcrumb so the model sees "Skills/Researcher.md" rather
     // than the absolute path (which is noisy and leaks the user's
     // home directory).
-    let mut out = String::with_capacity(text.len() + bodies.values().map(|s| s.len()).sum::<usize>() + 256);
+    let mut out =
+        String::with_capacity(text.len() + bodies.values().map(|s| s.len()).sum::<usize>() + 256);
     out.push_str(text);
     out.push_str("\n\n<context>\n");
     for (path, body) in &bodies {
-        let rel = path.strip_prefix(vault).unwrap_or(path).trim_start_matches('/');
+        let rel = path
+            .strip_prefix(vault)
+            .unwrap_or(path)
+            .trim_start_matches('/');
         out.push_str(&format!("## {rel}\n\n"));
         out.push_str(body);
         if !body.ends_with('\n') {
@@ -196,7 +200,11 @@ mod tests {
     #[test]
     fn expand_resolves_and_appends_context_block() {
         let dir = TempDir::new().unwrap();
-        touch(dir.path(), "Skills/Researcher.md", "A researcher investigates.");
+        touch(
+            dir.path(),
+            "Skills/Researcher.md",
+            "A researcher investigates.",
+        );
         let vault = dir.path().to_string_lossy().to_string();
         let r = expand(&vault, "tell me about a [[Researcher]].");
         assert!(r.text.contains("tell me about a [[Researcher]]."));

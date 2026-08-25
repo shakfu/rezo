@@ -31,6 +31,18 @@ pub struct AgentState {
     /// Map of confirmation_id -> oneshot sender. The gate inserts on
     /// prompt; `confirm_tool_call` (or shutdown) removes and resolves.
     pending_confirms: Mutex<HashMap<String, oneshot::Sender<bool>>>,
+    /// Tools the user has explicitly granted standing auto-approval,
+    /// for tools that declare `requires_confirmation()`.
+    ///
+    /// This is deliberately *not* the frontend's `tool_permissions`
+    /// map. That map is a per-request argument, so a frontend bug or a
+    /// bad state restore could set `shell_exec` to "always" and the
+    /// backend would have no way to tell that apart from a real user
+    /// decision. A grant only lands here via `grant_tool_always`,
+    /// which is its own command and its own user action, and it is
+    /// process-local: it does not survive a restart, by design. See
+    /// `TauriConfirmationGate::ask` for how the two combine.
+    always_grants: Mutex<std::collections::HashSet<String>>,
 }
 
 impl AgentState {
@@ -45,6 +57,43 @@ impl AgentState {
         if let Ok(mut g) = self.pending_confirms.lock() {
             g.clear();
         }
+    }
+
+    /// Record a standing auto-approval for `tool`. Called only from
+    /// the `grant_tool_always` command.
+    pub fn grant_always(&self, tool: String) {
+        if let Ok(mut g) = self.always_grants.lock() {
+            g.insert(tool);
+        }
+    }
+
+    /// Withdraw a standing auto-approval.
+    pub fn revoke_always(&self, tool: &str) {
+        if let Ok(mut g) = self.always_grants.lock() {
+            g.remove(tool);
+        }
+    }
+
+    /// Whether the user has granted `tool` standing auto-approval.
+    /// A poisoned lock reads as "no grant" — failing closed is the
+    /// only safe direction for an authorization check.
+    pub fn has_always_grant(&self, tool: &str) -> bool {
+        self.always_grants
+            .lock()
+            .map(|g| g.contains(tool))
+            .unwrap_or(false)
+    }
+
+    /// Tools currently holding a standing grant, sorted. Lets the
+    /// settings UI show what has been granted and offer a revoke.
+    pub fn always_grants(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .always_grants
+            .lock()
+            .map(|g| g.iter().cloned().collect())
+            .unwrap_or_default();
+        v.sort();
+        v
     }
 
     /// Allocate a oneshot for a pending confirmation. Returns the
@@ -150,7 +199,7 @@ pub async fn agent_chat(
         let llm_state = app.state::<Arc<llm::LlmState>>().inner().clone();
         (Arc::new(LocalProvider::new(llm_state)), label)
     } else {
-        let (api_key, base_url, model) = resolve_cloud_config(&opts)?;
+        let (api_key, base_url, model) = llm::resolve_cloud_config(&opts)?;
         let label = opts.provider.clone();
         (
             Arc::new(CloudProvider::new(api_key, base_url, label)),
@@ -187,9 +236,18 @@ pub async fn agent_chat(
         }
     }
 
+    // Snapshot each registered tool's own confirmation requirement.
+    // This is the floor the frontend's permission map cannot lower;
+    // see `TauriConfirmationGate`.
+    let confirm_required: HashMap<String, bool> = registry
+        .tools()
+        .map(|t| (t.name().to_string(), t.requires_confirmation()))
+        .collect();
+
     let gate: Arc<dyn ConfirmationGate> = Arc::new(TauriConfirmationGate::new(
         app.clone(),
         opts.tool_permissions.clone(),
+        confirm_required,
     ));
 
     let agent_opts = AgentOpts {
@@ -252,50 +310,50 @@ pub fn confirm_tool_call(state: State<'_, AgentState>, confirmation_id: String, 
     }
 }
 
-/// Resolve api_key + base_url + model from the cloud provider catalog
-/// in `llm.rs`. Mirrors the resolution `llm::chat` does for non-tool
-/// chats so behavior stays consistent.
-fn resolve_cloud_config(opts: &AgentChatOpts) -> Result<(String, String, String), String> {
-    let def = llm::cloud_provider_def(&opts.provider)
-        .ok_or_else(|| format!("unknown provider: {}", opts.provider))?;
+/// Record a standing auto-approval for `tool`, so a tool that
+/// declares `requires_confirmation()` stops prompting.
+///
+/// This exists as its own command precisely so the grant is a
+/// distinct user action rather than a field in the per-request
+/// options blob. `TauriConfirmationGate` will not clear the
+/// confirmation floor on the strength of `tool_permissions` alone.
+///
+/// Grants are process-local and are not persisted: a restart returns
+/// every tool to prompting. Persisting them is a bigger decision than
+/// this change should make on its own (see TODO.md, "Trust toggles
+/// persisted across sessions").
+#[tauri::command]
+pub fn grant_tool_always(state: State<'_, AgentState>, tool: String) {
+    state.grant_always(tool);
+}
 
-    let (api_key, base_url) = if def.user_configurable {
-        let base_url = opts
-            .base_url
-            .as_ref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| "base URL is required".to_string())?
-            .to_string();
-        let api_key = opts
-            .api_key
-            .clone()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "no-key".to_string());
-        (api_key, base_url)
-    } else {
-        let api_key = std::env::var(&def.env_var)
-            .ok()
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| format!("{} is not set", &def.env_var))?;
-        (api_key, def.base_url.clone())
-    };
+/// Withdraw a standing auto-approval.
+#[tauri::command]
+pub fn revoke_tool_always(state: State<'_, AgentState>, tool: String) {
+    state.revoke_always(&tool);
+}
 
-    let model = opts
-        .model
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            if def.default_model.is_empty() {
-                None
-            } else {
-                Some(def.default_model.to_string())
-            }
-        })
-        .ok_or_else(|| "model is required".to_string())?;
+/// Tools currently holding a standing auto-approval, sorted. The
+/// settings UI reads this to show what has been granted; it is the
+/// authoritative answer, unlike the frontend's own permission map.
+#[tauri::command]
+pub fn tool_always_grants(state: State<'_, AgentState>) -> Vec<String> {
+    state.always_grants()
+}
 
-    Ok((api_key, base_url, model))
+/// Bridge `AgentChatOpts` onto the shared cloud-config resolver in
+/// `rezon_core::llm`. The resolution rules (env-var lookup for named
+/// providers, required base URL for `other`, default-model fallback)
+/// live there so the agent path and the plain-chat path cannot drift.
+impl<'a> From<&'a AgentChatOpts> for llm::CloudConfigInput<'a> {
+    fn from(o: &'a AgentChatOpts) -> Self {
+        llm::CloudConfigInput {
+            provider: &o.provider,
+            model: o.model.as_deref(),
+            base_url: o.base_url.as_deref(),
+            api_key: o.api_key.as_deref(),
+        }
+    }
 }
 
 /// Apply `wikilink::expand` to the system message and the most-recent
@@ -323,4 +381,53 @@ fn apply_expand(vault: &str, text: &str, app: &AppHandle) -> String {
         );
     }
     r.text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opts(provider: &str, model: Option<&str>, base_url: Option<&str>) -> AgentChatOpts {
+        AgentChatOpts {
+            provider: provider.to_string(),
+            model: model.map(str::to_string),
+            base_url: base_url.map(str::to_string),
+            api_key: None,
+            max_steps: None,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            tool_permissions: HashMap::new(),
+        }
+    }
+
+    // The agent path and the plain-chat path share one resolver
+    // (`llm::resolve_cloud_config`) via the `From` impl above. These
+    // tests exist to catch a re-divergence: if someone reintroduces a
+    // local copy, the `From` impl goes unused and these stop covering
+    // the code that actually runs.
+    #[test]
+    fn agent_opts_resolve_other_provider() {
+        let o = opts("other", Some("my-model"), Some("http://localhost:11434/v1"));
+        let (key, base, model) = llm::resolve_cloud_config(&o).unwrap();
+        // `other` with no key falls back to the placeholder rather
+        // than erroring — local servers usually want no auth.
+        assert_eq!(key, "no-key");
+        assert_eq!(base, "http://localhost:11434/v1");
+        assert_eq!(model, "my-model");
+    }
+
+    #[test]
+    fn agent_opts_other_requires_base_url() {
+        let o = opts("other", Some("m"), None);
+        let err = llm::resolve_cloud_config(&o).unwrap_err();
+        assert!(err.contains("base URL"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn agent_opts_unknown_provider_errors() {
+        let o = opts("nope", Some("m"), None);
+        let err = llm::resolve_cloud_config(&o).unwrap_err();
+        assert!(err.contains("unknown provider"), "unexpected error: {err}");
+    }
 }

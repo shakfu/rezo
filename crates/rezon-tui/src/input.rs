@@ -217,7 +217,7 @@ pub enum ReadOutcome {
 mod tests {
     use super::*;
     use rustyline::history::DefaultHistory;
-    use rustyline::{Context as RlContext, history::History};
+    use rustyline::{history::History, Context as RlContext};
 
     /// Spin up a rustyline `Context` over an empty history so the
     /// completer can be called in isolation. The history reference

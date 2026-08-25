@@ -4,7 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Tooltip } from "@base-ui/react/tooltip";
 import { ConfirmToolDialog, type PendingConfirm } from "./ConfirmToolDialog";
-import { cloudApiKeyAccount, keychainGet, keychainSet } from "./secrets";
+import { cloudApiKeyAccount, keychainSet } from "./secrets";
 import "katex/dist/katex.min.css";
 import "highlight.js/styles/github-dark.css";
 import "./App.css";
@@ -17,6 +17,7 @@ import {
   ModelStatus,
   Settings,
   ToolCallEntry,
+  ModelCatalog,
   ToolInfo,
   toolPermissionFor,
 } from "./types";
@@ -43,6 +44,13 @@ import { RightSidebar } from "./RightSidebar";
 import { NotesView } from "./notes/NotesView";
 import { loadAppMode, saveAppMode, type AppMode } from "./notes/vault";
 
+
+/// Trailing-debounce window for persisting conversations. Long enough
+/// that a fast token stream collapses to a handful of writes, short
+/// enough that an unexpected kill loses at most this much. Every path
+/// that could drop a pending write (turn end, unload, unmount)
+/// flushes explicitly, so this only bounds the crash case.
+const SAVE_DEBOUNCE_MS = 400;
 
 function ToolPill({ call }: { call: ToolCallEntry }) {
   const [expanded, setExpanded] = useState(false);
@@ -149,9 +157,40 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Persisting on every `conversations` change would mean one
+  // JSON.stringify over the *whole* conversation set plus one
+  // synchronous localStorage write per streamed token, since the
+  // `chat-token` / agent-token listeners append into `conversations`
+  // token by token. That cost grows with history length and with
+  // persisted tool results, so it degrades exactly as a session gets
+  // long. Debounce instead: streaming pays one write per idle gap.
+  //
+  // `conversationsLiveRef` mirrors the latest value so the flush paths
+  // below write current state rather than whatever was captured when
+  // the timer was armed.
+  const conversationsLiveRef = useRef(conversations);
+  conversationsLiveRef.current = conversations;
+
   useEffect(() => {
-    saveConversations(conversations);
+    const t = window.setTimeout(
+      () => saveConversations(conversationsLiveRef.current),
+      SAVE_DEBOUNCE_MS,
+    );
+    return () => window.clearTimeout(t);
   }, [conversations]);
+
+  // Flush on teardown so a quit inside a debounce window keeps the
+  // tail. (The end-of-turn flush lives next to the `streaming` state
+  // it depends on, further down.)
+  useEffect(() => {
+    const flush = () => saveConversations(conversationsLiveRef.current);
+    window.addEventListener("beforeunload", flush);
+    return () => {
+      window.removeEventListener("beforeunload", flush);
+      flush();
+    };
+  }, []);
+
   useEffect(() => {
     saveCurrentId(currentId);
   }, [currentId]);
@@ -197,10 +236,19 @@ function App() {
   const [loadedPath, setLoadedPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  // End-of-turn flush for the debounced conversation persistence
+  // above. A turn ending is the point a user is most likely to quit,
+  // so don't leave its last tokens sitting in a pending timer.
+  useEffect(() => {
+    if (!streaming) saveConversations(conversationsLiveRef.current);
+  }, [streaming]);
+
   const [provider, setProvider] = useState<string>(
     () => loadLastProvider() ?? "local",
   );
   const [cloudProviders, setCloudProviders] = useState<CloudProviderInfo[]>([]);
+
   const [cloudModel, setCloudModel] = useState<Record<string, string>>(() =>
     loadCloudModels(),
   );
@@ -212,7 +260,45 @@ function App() {
   // hydration `useEffect` below that asks the backend for each
   // provider's stored key; meanwhile the field renders empty so
   // the user can type one in.
-  const [cloudApiKey, setCloudApiKey] = useState<Record<string, string>>({});
+  // Which providers have a key stored, not the keys themselves. The
+  // backend resolves the actual value per request; the webview never
+  // holds one. Seeded from `cloud_providers()`'s `apiKeySet`, which
+  // already reflects the full chain (keychain, then environment).
+  const [keySaved, setKeySaved] = useState<Record<string, boolean>>({});
+
+  // Per-provider model catalogs. Fetched lazily — `/v1/models` is
+  // authenticated on the named providers, so there is nothing to fetch
+  // with at launch. The trigger is "this provider is selected and a
+  // key resolves", which is also when the answer first matters.
+  const [modelCatalogs, setModelCatalogs] = useState<
+    Record<string, ModelCatalog>
+  >({});
+
+  async function loadModelCatalog(providerKey: string, refresh = false) {
+    try {
+      const c = await invoke<ModelCatalog>("provider_models", {
+        provider: providerKey,
+        refresh,
+      });
+      setModelCatalogs((prev) => ({ ...prev, [providerKey]: c }));
+    } catch {
+      // The curated list is already rendering; a failure here changes
+      // nothing the user can see and needs no dialog.
+    }
+  }
+
+  // Look up the catalog when the selected provider changes, and again
+  // if a key appears for it later (saving one is the moment the fetch
+  // becomes possible). Cached results make the repeat call cheap; the
+  // backend only hits the network past its TTL.
+  useEffect(() => {
+    if (provider === "local") return;
+    const p = cloudProviders.find((c) => c.key === provider);
+    if (!p || p.userConfigurable) return;
+    if (!(keySaved[provider] ?? p.apiKeySet)) return;
+    void loadModelCatalog(provider);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider, cloudProviders, keySaved]);
   // Tool catalog from the backend; powers the Settings > Tools tab and
   // the toolPermissions map passed to agent_chat.
   const [tools, setTools] = useState<ToolInfo[]>([]);
@@ -511,23 +597,12 @@ function App() {
           }
           return next;
         });
-        // Hydrate cloud API keys from the OS keychain. Done after
-        // the provider list resolves so we only request slots that
-        // actually exist. Errors per-provider are swallowed —
-        // keyring is best-effort; a hostile policy on Linux can
-        // refuse access without preventing usage.
-        const hydrated: Record<string, string> = {};
-        for (const p of list) {
-          try {
-            const v = await keychainGet(cloudApiKeyAccount(p.key));
-            if (v) hydrated[p.key] = v;
-          } catch {
-            /* ignore */
-          }
-        }
-        if (Object.keys(hydrated).length > 0) {
-          setCloudApiKey((prev) => ({ ...hydrated, ...prev }));
-        }
+        // Record which providers already resolve a key. `apiKeySet`
+        // covers keychain *and* environment, so this is accurate for
+        // both a saved key and an exported one.
+        setKeySaved(
+          Object.fromEntries(list.map((p) => [p.key, p.apiKeySet])),
+        );
       } catch {
         /* ignore */
       }
@@ -585,7 +660,6 @@ function App() {
   const activeBaseUrl = activeCloud
     ? (cloudBaseUrl[activeCloud.key] ?? "").trim()
     : "";
-  const activeApiKey = activeCloud ? (cloudApiKey[activeCloud.key] ?? "") : "";
   const cloudReady = activeCloud
     ? !!activeCloudModel &&
       (!activeCloud.userConfigurable || !!activeBaseUrl)
@@ -656,13 +730,16 @@ function App() {
         }
       : {};
 
+    // No `apiKey` field: the backend resolves it (runtime override ->
+    // keychain -> environment). Putting it here would mean the webview
+    // holds a plaintext key and ships it across IPC on every turn, for
+    // no benefit — nothing in the UI needs the value.
     const opts = activeCloud
       ? activeCloud.userConfigurable
         ? {
             provider: activeCloud.key,
             model: activeCloudModel,
             baseUrl: activeBaseUrl,
-            apiKey: activeApiKey,
             ...sampler,
           }
         : { provider: activeCloud.key, model: activeCloudModel, ...sampler }
@@ -993,13 +1070,15 @@ function App() {
         setCloudModel={setCloudModel}
         cloudBaseUrl={cloudBaseUrl}
         setCloudBaseUrl={setCloudBaseUrl}
-        cloudApiKey={cloudApiKey}
-        setCloudApiKey={setCloudApiKey}
+        modelCatalog={modelCatalogs[provider]}
+        onRefreshModels={() => void loadModelCatalog(provider, true)}
+        keySaved={keySaved}
+        setKeySaved={setKeySaved}
         onCloudApiKeyCommit={(key, value) => {
-          // Fire-and-forget: keychain failures are non-fatal (a
-          // hostile Linux policy could deny without us being able
-          // to do anything). The in-memory `cloudApiKey` map is
-          // still authoritative for the current session.
+          // Fire-and-forget: keychain failures are non-fatal (a hostile
+          // Linux policy can deny access without us being able to do
+          // anything about it). Nothing is cached locally — the backend
+          // re-reads the store on the next request.
           keychainSet(cloudApiKeyAccount(key), value).catch(() => {});
         }}
         modelPath={modelPath}
@@ -1033,6 +1112,12 @@ function App() {
               confirmationId: id,
               approved,
             }).catch(() => {});
+          }}
+          onAlwaysAllow={(tool) => {
+            // Backend-recorded grant, not a change to the local
+            // permission map: for confirmation-required tools the
+            // gate only honors a grant it stored itself.
+            invoke("grant_tool_always", { tool }).catch(() => {});
           }}
         />
       </div>

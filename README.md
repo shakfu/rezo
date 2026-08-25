@@ -43,13 +43,16 @@ crates/
                               `ChatSink` trait abstracts the event surface.
       embed.rs                Embedding model worker + catch-up loop.
       search.rs               FTS5 + sqlite-vec per-vault index, file watcher.
-      vault.rs                Path-traversal-safe filesystem ops.
+      vault.rs                Vault-scoped filesystem ops; containment
+                              checked on resolved paths.
+      journal.rs              Append-only vault write log; undo / redo.
+      wikilink.rs             `[[target]]` parsing + expansion.
       agent/                  Provider-agnostic agent loop + tools.
         cloud.rs              Cloud `Provider` impl.
         local.rs              Local `Provider` impl (owns `Arc<LlmState>`).
         loop_.rs              `run_agent` — streaming, tool dispatch.
-        tools/                current_time, file_read, shell_exec, web_fetch,
-                              search_notes.
+        testing.rs            Test doubles for the loop (cfg(test) only).
+        tools/                See "Agent tools" below.
         confirm.rs            `ConfirmationGate` trait.
         event.rs              `EventSink` trait + `LogEventSink`.
     models.json               Cloud provider catalog.
@@ -75,12 +78,49 @@ crates/
       input.rs                rustyline editor + tab completion.
       picker.rs               nucleo + crossterm fuzzy picker.
       markdown.rs             Inline markdown -> ANSI renderer.
+      conv_index.rs           FTS5 index over conversation history.
+      setup.rs                First-run provider/model setup flow.
       spinner.rs              Braille spinner for blocking loads.
       store.rs                Conversations / vault / disabled-tools JSON.
 ```
 
 The Cargo workspace root is `Cargo.toml`; `make check` / `make test`
 cover all three crates.
+
+## Agent tools
+
+Registered in `crates/rezon-core/src/agent/tools/`. The **Confirm**
+column is each tool's own `requires_confirmation()`.
+
+| tool | confirm | what it does |
+| --- | --- | --- |
+| `current_time` | no | Current local time. |
+| `file_read` | yes | Read a regular file by absolute path. Capped at 256 KiB; directories and non-regular files (FIFOs, devices) are refused. |
+| `web_fetch` | yes | HTTP(S) GET. 15s timeout, 1 MiB body cap applied while reading. Redirects followed only within the same host; a cross-host hop is reported, not chased. |
+| `shell_exec` | yes | Run a command via `$SHELL -c`. 60s timeout, process-group kill on overrun, 256 KiB per stream. |
+| `search_notes` | no | FTS5 / semantic search over the open vault. |
+| `read_note` | no | Read a note by vault-relative path. |
+| `write_note` | yes | Create or overwrite a note. |
+| `append_note` | yes | Append to a note. |
+| `edit_note` | yes | Search-and-replace within a note. |
+| `undo_note` | yes | Revert the most recent vault write via the journal. |
+
+The vault tools (`search_notes` through `undo_note`) need an open
+vault. Every write goes through `journal.rs`, so `undo_note` and the
+history panel can reconstruct what changed.
+
+### Confirmation policy
+
+Tools that declare `requires_confirmation()` always prompt before
+dispatch. This is enforced in the backend gate, not in the UI: the
+per-tool "Ask / Always / Disable" setting cannot mark a side-effecting
+tool as auto-approved. To stop being asked for one, use **Always
+allow** in the confirmation dialog — that records a grant backend-side
+which lasts until rezon restarts and is not written to disk. `Disable`
+is always honoured, since it only removes capability.
+
+`rezon-tui` applies the same floor. It has no "always" affordance, so
+side-effecting tools prompt on every call there.
 
 ## Quick start
 
@@ -91,9 +131,9 @@ make install      # bun install (frontend deps)
 make dev          # bun run tauri dev --config crates/rezon-web/tauri.conf.json
 ```
 
-API keys for cloud providers can be set in the environment or entered
-in the right-sidebar Settings; the **Other** provider takes a base URL
-+ (optional) API key in the UI.
+Enter an API key in the right sidebar for whichever cloud provider is
+selected; it is saved to the OS keychain. See **API keys** below for
+the full resolution order, including the environment-variable path.
 
 ### TUI (rezon-tui)
 
@@ -206,9 +246,50 @@ make clean              rm node_modules dist target …
   builds with `cargo` alone.
 - Tauri 2 prerequisites for the GUI.
 - For the local backend: a GGUF model file with chat-template metadata.
-- For named cloud backends: the relevant API key (`OPENAI_API_KEY` /
-  `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY`) in the environment when
-  launching, or supplied at runtime via the GUI's settings or
-  `rezon-tui`'s `--api-key`.
+- For named cloud backends: an API key, supplied by any of the routes
+  in **API keys** below.
+
+## API keys
+
+A key is resolved per request, from the first source that has one:
+
+1. **Runtime** — `rezon-tui --api-key ...`, or the key field for the
+   **Other** provider.
+2. **OS keychain** — macOS Keychain, Windows Credential Manager,
+   secret-service on Linux. Written from the right sidebar's key field,
+   under the account `api_key:<provider>`. Shared by both shells.
+3. **Environment** — the provider's `env var` from the table above,
+   including anything loaded from a `.env` (see below).
+
+Resolution lives in `rezon_core::llm::lookup_api_key`, and the ordering
+is deliberate. Runtime wins because it is the most explicit thing a
+user can do. The keychain sits ahead of the environment because it is
+the only source a *packaged* GUI can read at all: an app launched from
+Finder, the dock, or a `.desktop` entry never runs a shell profile, so
+nothing exported in `~/.zshrc` is visible to it. The environment stays
+last and fully supported — it is how terminal launches, `make dev`, and
+CI supply keys.
+
+Keys are write-only from the frontend's perspective. There is no Tauri
+command that returns one; the UI can save a key and ask whether one is
+configured (`keychain_has`), but never reads the value back, and no key
+travels on a chat request payload.
+
+### `.env`
+
+Loaded at startup by both shells, from two optional locations:
+
+- `.env` found by walking up from the current directory — the
+  development case.
+- `<app config dir>/.env` — the packaged case, where the cwd is
+  unpredictable. That is
+  `~/Library/Application Support/rezon-tui/.env` on macOS,
+  `%APPDATA%\rezon-tui\.env` on Windows,
+  `$XDG_CONFIG_HOME/rezon-tui/.env` (or `~/.config/rezon-tui/.env`) on
+  Linux.
+
+Variables already present in the environment win over both, so an
+explicit `export` always overrides a stale `.env`. Add `.env` to your
+global gitignore if you keep one in a checkout.
 
 See `CHANGELOG.md` for history.

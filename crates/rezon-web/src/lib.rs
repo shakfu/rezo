@@ -12,6 +12,15 @@ use tauri::{Emitter, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Load `.env` before anything reads a key. Keeps the development
+    // path working: a repo `.env` for `make dev`, and one under the app
+    // config dir for packaged builds, which have no shell profile to
+    // inherit from. Already-exported variables win over both.
+    let loaded = rezon_core::dotenv::load();
+    for p in &loaded.paths {
+        eprintln!("loaded env from {}", p.display());
+    }
+
     // sqlite-vec is registered as a SQLite auto-extension *before* any
     // Connection is opened. Every connection opened thereafter
     // (rusqlite or otherwise) gets `vec_*` and `vec0` available.
@@ -29,10 +38,14 @@ pub fn run() {
             llm::chat,
             llm::cancel_chat,
             llm::cloud_providers,
+            llm::provider_models,
             agent::commands::agent_chat,
             agent::commands::cancel_agent,
             agent::commands::confirm_tool_call,
             agent::commands::tools_catalog,
+            agent::commands::grant_tool_always,
+            agent::commands::revoke_tool_always,
+            agent::commands::tool_always_grants,
             vault::vault_list_tree,
             vault::vault_read,
             vault::vault_write,
@@ -44,7 +57,7 @@ pub fn run() {
             vault::vault_undo,
             vault::vault_redo,
             vault::vault_journal_recent,
-            secrets::keychain_get,
+            secrets::keychain_has,
             secrets::keychain_set,
             secrets::keychain_delete,
             search::vault_search,

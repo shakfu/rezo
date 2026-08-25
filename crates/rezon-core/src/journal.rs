@@ -224,7 +224,10 @@ pub fn recent_entries(vault: &str, limit: usize) -> Result<Vec<JournalEntry>, St
 /// Restore a blob to disk. Used by undo to reinstate a `before`
 /// snapshot. Returns the bytes read for the caller's bookkeeping.
 pub fn read_blob(vault: &str, sha: &str) -> Result<Vec<u8>, String> {
-    let p = PathBuf::from(vault).join(HISTORY_DIR).join(BLOBS_DIR).join(sha);
+    let p = PathBuf::from(vault)
+        .join(HISTORY_DIR)
+        .join(BLOBS_DIR)
+        .join(sha);
     fs::read(&p).map_err(|e| format!("read blob {sha}: {e}"))
 }
 
@@ -295,15 +298,13 @@ pub fn redo_last_op(vault: &str) -> Result<Option<RedoOutcome>, String> {
                 fs::create_dir_all(parent)
                     .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
             }
-            fs::write(&abs, &bytes)
-                .map_err(|e| format!("restore {}: {e}", abs.display()))?;
+            fs::write(&abs, &bytes).map_err(|e| format!("restore {}: {e}", abs.display()))?;
         }
         None => {
             // Undoing reached a deletion — redoing it removes the
             // file again. Missing is fine.
             if abs.exists() {
-                fs::remove_file(&abs)
-                    .map_err(|e| format!("delete {}: {e}", abs.display()))?;
+                fs::remove_file(&abs).map_err(|e| format!("delete {}: {e}", abs.display()))?;
             }
         }
     }
@@ -383,15 +384,13 @@ pub fn undo_last_op(vault: &str) -> Result<Option<UndoOutcome>, String> {
                 fs::create_dir_all(parent)
                     .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
             }
-            fs::write(&abs, &bytes)
-                .map_err(|e| format!("restore {}: {e}", abs.display()))?;
+            fs::write(&abs, &bytes).map_err(|e| format!("restore {}: {e}", abs.display()))?;
         }
         None => {
             // Target was a creation; undo deletes the file. Missing
             // is fine — someone may have already removed it.
             if abs.exists() {
-                fs::remove_file(&abs)
-                    .map_err(|e| format!("delete {}: {e}", abs.display()))?;
+                fs::remove_file(&abs).map_err(|e| format!("delete {}: {e}", abs.display()))?;
             }
         }
     }
@@ -474,8 +473,8 @@ fn read_log(vault_root: &Path) -> Result<Vec<JournalEntry>, String> {
         if line.is_empty() {
             continue;
         }
-        let e: JournalEntry = serde_json::from_str(line)
-            .map_err(|e| format!("parse log line {}: {e}", i + 1))?;
+        let e: JournalEntry =
+            serde_json::from_str(line).map_err(|e| format!("parse log line {}: {e}", i + 1))?;
         out.push(e);
     }
     Ok(out)
@@ -519,13 +518,28 @@ pub fn gc(vault_root: &Path, max_entries: usize) -> Result<usize, String> {
     let mut alive: std::collections::HashSet<String> = Default::default();
     for e in &kept {
         match &e.op {
-            Op::Write { before_sha, after_sha } => {
-                if let Some(s) = before_sha { alive.insert(s.clone()); }
-                if let Some(s) = after_sha { alive.insert(s.clone()); }
+            Op::Write {
+                before_sha,
+                after_sha,
+            } => {
+                if let Some(s) = before_sha {
+                    alive.insert(s.clone());
+                }
+                if let Some(s) = after_sha {
+                    alive.insert(s.clone());
+                }
             }
-            Op::Undo { before_sha, after_sha, .. } => {
-                if let Some(s) = before_sha { alive.insert(s.clone()); }
-                if let Some(s) = after_sha { alive.insert(s.clone()); }
+            Op::Undo {
+                before_sha,
+                after_sha,
+                ..
+            } => {
+                if let Some(s) = before_sha {
+                    alive.insert(s.clone());
+                }
+                if let Some(s) = after_sha {
+                    alive.insert(s.clone());
+                }
             }
         }
     }
@@ -533,7 +547,9 @@ pub fn gc(vault_root: &Path, max_entries: usize) -> Result<usize, String> {
     if let Ok(reader) = fs::read_dir(&blobs_dir) {
         for entry in reader.flatten() {
             let name = entry.file_name();
-            let Some(name_str) = name.to_str() else { continue };
+            let Some(name_str) = name.to_str() else {
+                continue;
+            };
             if !alive.contains(name_str) {
                 let _ = fs::remove_file(entry.path());
             }
@@ -653,7 +669,10 @@ mod tests {
         let out = record_write(&vault, "write_note", "X.md", None, Some(b"hello")).unwrap();
         assert!(dir.path().join(".rezon-history/log.jsonl").exists());
         match &out.entry.op {
-            Op::Write { before_sha, after_sha } => {
+            Op::Write {
+                before_sha,
+                after_sha,
+            } => {
                 assert!(before_sha.is_none());
                 let sha = after_sha.as_ref().unwrap();
                 let blob = read_relative(dir.path(), &format!(".rezon-history/blobs/{sha}"));
@@ -727,13 +746,12 @@ mod tests {
         let kept = read_log(dir.path()).unwrap();
         assert_eq!(kept.len(), 2);
         // Only the surviving entries' blobs remain.
-        let blobs: std::collections::HashSet<String> = fs::read_dir(
-            dir.path().join(".rezon-history/blobs"),
-        )
-        .unwrap()
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
+        let blobs: std::collections::HashSet<String> =
+            fs::read_dir(dir.path().join(".rezon-history/blobs"))
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
         assert_eq!(blobs.len(), 2);
     }
 

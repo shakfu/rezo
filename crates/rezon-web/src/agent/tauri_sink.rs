@@ -46,20 +46,6 @@ impl EventSink for TauriEventSink {
                     }),
                 );
             }
-            AgentEvent::ToolConfirm {
-                confirmation_id,
-                name,
-                arguments,
-            } => {
-                let _ = app.emit(
-                    "agent-tool-confirm",
-                    &json!({
-                        "confirmationId": confirmation_id,
-                        "name": name,
-                        "arguments": arguments,
-                    }),
-                );
-            }
             AgentEvent::Stats(s) => {
                 let _ = app.emit("agent-stats", &s);
             }

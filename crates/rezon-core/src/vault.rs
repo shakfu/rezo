@@ -1,7 +1,9 @@
 // Vault commands: filesystem operations scoped to a user-chosen
-// vault root. The frontend passes absolute paths; we validate that
-// every path is contained inside the supplied vault root to prevent
-// escape via "..".
+// vault root. The frontend passes absolute paths; every one is
+// validated as contained inside the supplied vault root before any
+// filesystem call. Containment is decided on resolved paths, so both
+// `..` traversal and symlinks pointing out of the vault are rejected
+// — see `within`.
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -21,7 +23,58 @@ pub enum VaultEntry {
     },
 }
 
-fn normalize(p: &Path) -> PathBuf {
+/// Resolve `p` the way the kernel would, walking it left to right and
+/// following any symlink as it is encountered, but tolerating
+/// components that do not exist yet.
+///
+/// Plain `canonicalize` fails outright on a path whose tail is missing,
+/// and several callers here legitimately name a file they are about to
+/// create (`vault_write`, `vault_create`, `vault_mkdir`, the
+/// destination of `vault_rename`).
+///
+/// Walking forwards rather than normalizing the string first is what
+/// makes `..` correct in the presence of links. For
+/// `vault/link/../x` where `link` -> `/elsewhere`, text-first
+/// normalization cancels `link` against `..` and concludes `vault/x`
+/// — inside the vault. The kernel instead resolves `link` to
+/// `/elsewhere` and applies `..` to *that*, landing on `/x`. Resolving
+/// as we go gives the same answer the filesystem will.
+fn resolve_path(p: &Path) -> Result<PathBuf, String> {
+    let mut real = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::Prefix(prefix) => real.push(prefix.as_os_str()),
+            Component::RootDir => real.push(Component::RootDir.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                real.pop();
+            }
+            Component::Normal(name) => {
+                real.push(name);
+                // Only an existing symlink needs resolving; a missing
+                // component cannot be one, and a real directory or file
+                // is already where it says it is.
+                match fs::symlink_metadata(&real) {
+                    Ok(md) if md.file_type().is_symlink() => {
+                        real = real
+                            .canonicalize()
+                            .map_err(|e| format!("cannot resolve symlink {:?}: {e}", real))?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    if real.as_os_str().is_empty() {
+        return Err(format!("cannot resolve path {:?}", p));
+    }
+    Ok(real)
+}
+
+/// Collapse `.` and `..` textually, without touching the filesystem.
+/// Used only to decide whether an error message should bother showing
+/// the resolved path — never for a containment decision.
+fn normalize_for_display(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for c in p.components() {
         match c {
@@ -35,10 +88,38 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
+/// Reject any path that does not land inside `vault`.
+///
+/// Containment is decided on *canonicalized* paths. A purely lexical
+/// check (which is what this used to do) says nothing about symlinks:
+/// a link inside the vault pointing at `~/.ssh/authorized_keys` passes
+/// a `starts_with` test on the literal path and is then happily
+/// followed by `fs::write`. Since `write_note` and friends are
+/// reachable by prompt injection through note content, "the string
+/// looks contained" is not a strong enough answer.
+///
+/// Canonicalizing the root as well is not optional: on macOS a home
+/// directory is commonly reached through a symlink
+/// (`/Users/me` -> `/System/Volumes/Data/Users/me`), so comparing a
+/// resolved target against an unresolved root would reject every path
+/// in a perfectly ordinary vault.
 fn within(vault: &Path, target: &Path) -> Result<(), String> {
-    let v = normalize(vault);
-    let t = normalize(target);
+    let v = vault
+        .canonicalize()
+        .map_err(|e| format!("vault root {:?} is not resolvable: {e}", vault))?;
+    let t = resolve_path(target)?;
     if !t.starts_with(&v) {
+        // Report the *resolved* path when it differs from what was
+        // asked for. The interesting case is a symlink, where the
+        // literal path sits happily inside the vault and only the
+        // resolved one shows the escape — an error naming just the
+        // original reads as nonsense ("that path IS in the vault").
+        if t != normalize_for_display(target) {
+            return Err(format!(
+                "path {:?} resolves to {:?}, which is outside vault {:?}",
+                target, t, vault
+            ));
+        }
         return Err(format!("path {:?} is outside vault {:?}", target, vault));
     }
     Ok(())
@@ -319,6 +400,143 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("outside vault"), "got: {err}");
+    }
+
+    // ---- Symlink containment ------------------------------------
+    //
+    // The lexical check these replaced passed every one of these: the
+    // literal path really does start with the vault root. Only the
+    // resolved path reveals where the write would land.
+
+    #[test]
+    #[cfg(unix)]
+    fn write_through_a_symlink_pointing_outside_is_rejected() {
+        let vault = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join("authorized_keys");
+        std::fs::write(&secret, "original").unwrap();
+
+        // A link sitting inside the vault, aimed out of it.
+        let link = vault.path().join("innocent.md");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        let err = vault_write(
+            vault.path().to_string_lossy().to_string(),
+            link.to_string_lossy().to_string(),
+            "pwned".to_string(),
+        )
+        .unwrap_err();
+        assert!(err.contains("outside vault"), "got: {err}");
+        assert_eq!(
+            std::fs::read_to_string(&secret).unwrap(),
+            "original",
+            "the file outside the vault was modified"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn read_through_a_symlink_pointing_outside_is_rejected() {
+        let vault = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join("secret.md");
+        std::fs::write(&secret, "classified").unwrap();
+
+        let link = vault.path().join("note.md");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        let err = vault_read(
+            vault.path().to_string_lossy().to_string(),
+            link.to_string_lossy().to_string(),
+        )
+        .unwrap_err();
+        assert!(err.contains("outside vault"), "got: {err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_into_a_symlinked_directory_pointing_outside_is_rejected() {
+        // The link is a path *component*, not the leaf, and the leaf
+        // does not exist yet — the create-a-new-file case.
+        let vault = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let link = vault.path().join("subdir");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+
+        let target = link.join("new.md");
+        let err = vault_write(
+            vault.path().to_string_lossy().to_string(),
+            target.to_string_lossy().to_string(),
+            "x".to_string(),
+        )
+        .unwrap_err();
+        assert!(err.contains("outside vault"), "got: {err}");
+        assert!(!outside.path().join("new.md").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn parentdir_after_a_symlink_resolves_against_the_link_target() {
+        // `vault/link/../escape.md` where link -> /outside/sub.
+        // Cancelling `link` against `..` textually would land on
+        // `vault/escape.md` and be allowed; the kernel lands on
+        // `/outside/escape.md`, which must not be.
+        let vault = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let sub = outside.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+
+        let link = vault.path().join("link");
+        std::os::unix::fs::symlink(&sub, &link).unwrap();
+
+        let target = link.join("..").join("escape.md");
+        let err = vault_write(
+            vault.path().to_string_lossy().to_string(),
+            target.to_string_lossy().to_string(),
+            "x".to_string(),
+        )
+        .unwrap_err();
+        assert!(err.contains("outside vault"), "got: {err}");
+        assert!(!outside.path().join("escape.md").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_symlink_staying_inside_the_vault_is_allowed() {
+        // Containment, not a blanket symlink ban: a link between two
+        // places in the same vault is a legitimate way to organize
+        // notes and keeps working.
+        let vault = TempDir::new().unwrap();
+        let real = vault.path().join("real.md");
+        std::fs::write(&real, "hi").unwrap();
+        let link = vault.path().join("alias.md");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let got = vault_read(
+            vault.path().to_string_lossy().to_string(),
+            link.to_string_lossy().to_string(),
+        )
+        .unwrap();
+        assert_eq!(got, "hi");
+    }
+
+    #[test]
+    fn rename_validates_both_endpoints() {
+        let vault = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let src = vault.path().join("a.md");
+        std::fs::write(&src, "x").unwrap();
+
+        // Destination outside the vault must be refused even though
+        // the source is fine.
+        let err = vault_rename(
+            vault.path().to_string_lossy().to_string(),
+            src.to_string_lossy().to_string(),
+            outside.path().join("b.md").to_string_lossy().to_string(),
+        )
+        .unwrap_err();
+        assert!(err.contains("outside vault"), "got: {err}");
+        assert!(src.exists(), "source must be untouched after a refusal");
     }
 
     #[test]

@@ -111,10 +111,8 @@ impl ConvIndex {
 
     /// Drop every row for a conversation.
     pub fn delete_conv(&self, conv_id: &str) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM conv_msgs WHERE conv_id = ?1",
-            params![conv_id],
-        )?;
+        self.conn
+            .execute("DELETE FROM conv_msgs WHERE conv_id = ?1", params![conv_id])?;
         Ok(())
     }
 
@@ -251,7 +249,8 @@ mod tests {
 
         // System + tool turns are skipped at insert time.
         idx.insert_message("c1", 2, "system", "be terse").unwrap();
-        idx.insert_message("c1", 3, "tool", "{\"ok\":true}").unwrap();
+        idx.insert_message("c1", 3, "tool", "{\"ok\":true}")
+            .unwrap();
         let hits = idx.search("terse", 10).unwrap();
         assert!(hits.is_empty(), "system turns shouldn't be indexed");
 

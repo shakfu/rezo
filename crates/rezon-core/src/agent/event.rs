@@ -33,14 +33,6 @@ pub enum AgentEvent {
         error: Option<String>,
     },
 
-    /// Confirmation request for a tool that requires user approval.
-    /// Phase-5 wiring; defined here so the event surface is stable.
-    ToolConfirm {
-        confirmation_id: String,
-        name: String,
-        arguments: String,
-    },
-
     /// Per-turn stream stats (token counts, timing).
     Stats(StreamStats),
 
@@ -89,11 +81,6 @@ impl EventSink for LogEventSink {
                     println!("[tool-end err] id={id} error={}", error.unwrap_or_default());
                 }
             }
-            AgentEvent::ToolConfirm {
-                confirmation_id,
-                name,
-                arguments,
-            } => println!("[tool-confirm] cid={confirmation_id} name={name} args={arguments}"),
             AgentEvent::Stats(s) => println!("\n[stats] {s:?}"),
             AgentEvent::Done { .. } => println!("\n[done]"),
             AgentEvent::Cancelled => println!("\n[cancelled]"),

@@ -124,3 +124,18 @@ export function toolPermissionFor(
     permissions[tool.name] ?? (tool.requiresConfirmation ? "ask" : "always")
   );
 }
+
+/// Result of `provider_models`. Mirrors
+/// `rezon_core::model_catalog::Catalog`.
+export type ModelCatalog = {
+  /// Curated entries, in catalog order (cheapest/default first).
+  recommended: string[];
+  /// Provider-reported entries not already recommended. Empty until a
+  /// fetch has succeeded.
+  fetched: string[];
+  source: "cache" | "fetched" | "staleCache" | "recommendedOnly";
+  fetchedAt: number | null;
+  /// Set when a fetch was attempted and failed. Advisory — the
+  /// catalog is still usable.
+  error: string | null;
+};

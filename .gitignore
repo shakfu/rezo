@@ -3,6 +3,9 @@
 debug
 target
 
+# environ
+.env
+
 # ide
 .vscode
 

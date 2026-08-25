@@ -1,7 +1,11 @@
 pub mod agent;
+pub mod dotenv;
 pub mod embed;
 pub mod journal;
 pub mod llm;
+pub mod model_catalog;
+pub mod paths;
 pub mod search;
+pub mod secrets;
 pub mod vault;
 pub mod wikilink;

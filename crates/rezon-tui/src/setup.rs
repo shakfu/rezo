@@ -28,9 +28,9 @@ use rustyline::{Context as RlContext, Editor, Helper};
 
 use crate::store::{config_dir, Store};
 
-const C_APP: &str = "\x1b[36m";    // cyan
-const C_META: &str = "\x1b[90m";   // dim grey
-const C_OK: &str = "\x1b[32m";     // green
+const C_APP: &str = "\x1b[36m"; // cyan
+const C_META: &str = "\x1b[90m"; // dim grey
+const C_OK: &str = "\x1b[32m"; // green
 const C_RESET: &str = "\x1b[0m";
 
 const PROVIDER_CHOICES: &[&str] = &["local", "openai", "anthropic", "openrouter", "other"];
@@ -57,9 +57,8 @@ fn run(store: &mut Store, forced: bool) -> Result<()> {
     // resolved (used by tests and as a last-resort fallback if HOME
     // is unset) but the visible defaults route through `~/Documents/
     // Rezon/...` so the user can find every artefact in one place.
-    let rezon_root = std::env::var_os("HOME").map(|h| {
-        PathBuf::from(h).join("Documents").join("Rezon")
-    });
+    let rezon_root =
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Documents").join("Rezon"));
     let under_root = |sub: &str| -> Option<String> {
         rezon_root
             .as_ref()
@@ -88,7 +87,11 @@ fn run(store: &mut Store, forced: bool) -> Result<()> {
             .ok()
             .or_else(|| under_root("models"))
     };
-    match prompt(&mut path_editor, "models dir (local *.gguf)", models_default.as_deref())? {
+    match prompt(
+        &mut path_editor,
+        "models dir (local *.gguf)",
+        models_default.as_deref(),
+    )? {
         PromptOutcome::Value(v) => store.models_dir = v,
         PromptOutcome::Abort => return Ok(()),
     }
@@ -102,7 +105,11 @@ fn run(store: &mut Store, forced: bool) -> Result<()> {
             .or_else(|| store.active_vault.clone())
             .or_else(|| under_root("vault"))
     };
-    match prompt(&mut path_editor, "vault dir (notes)", vault_default.as_deref())? {
+    match prompt(
+        &mut path_editor,
+        "vault dir (notes)",
+        vault_default.as_deref(),
+    )? {
         PromptOutcome::Value(v) => store.active_vault = v,
         PromptOutcome::Abort => return Ok(()),
     }
@@ -115,7 +122,11 @@ fn run(store: &mut Store, forced: bool) -> Result<()> {
             .ok()
             .or_else(|| under_root("exports"))
     };
-    match prompt(&mut path_editor, "output dir (/export default)", output_default.as_deref())? {
+    match prompt(
+        &mut path_editor,
+        "output dir (/export default)",
+        output_default.as_deref(),
+    )? {
         PromptOutcome::Value(v) => store.output_dir = v,
         PromptOutcome::Abort => return Ok(()),
     }

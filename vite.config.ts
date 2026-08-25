@@ -26,8 +26,11 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. don't watch the Rust side. The scaffold's `src-tauri` path
+      //    does not exist in this repo — the Tauri crate lives under
+      //    `crates/rezon-web` — so the original ignore matched nothing
+      //    and Vite watched the whole Cargo tree, including `target`.
+      ignored: ["**/crates/**", "**/target/**"],
     },
   },
 }));

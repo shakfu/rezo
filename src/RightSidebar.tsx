@@ -1,7 +1,8 @@
+import { useState } from "react";
 import { Combobox } from "@base-ui/react/combobox";
 import { Tooltip } from "./Tooltip";
 import { BaseSelect } from "./Select";
-import { CloudProviderInfo, Conversation } from "./types";
+import { CloudProviderInfo, Conversation, ModelCatalog } from "./types";
 
 type Props = {
   collapsed: boolean;
@@ -18,13 +19,21 @@ type Props = {
   setCloudBaseUrl: (
     fn: (prev: Record<string, string>) => Record<string, string>,
   ) => void;
-  cloudApiKey: Record<string, string>;
-  setCloudApiKey: (
-    fn: (prev: Record<string, string>) => Record<string, string>,
+  /// Live model catalog for the selected provider, when one has been
+  /// resolved. `undefined` means "not looked up yet".
+  modelCatalog?: ModelCatalog;
+  onRefreshModels: () => void;
+  /// Which providers currently resolve a key — from `apiKeySet`, so it
+  /// reflects the keychain *and* the environment. Not the keys
+  /// themselves; the frontend never holds one.
+  keySaved: Record<string, boolean>;
+  setKeySaved: (
+    fn: (prev: Record<string, boolean>) => Record<string, boolean>,
   ) => void;
-  /// Called when the API-key input loses focus. Persists to the OS
-  /// keychain via the parent; doing it here on blur (rather than
-  /// onChange) keeps every keystroke from hammering the keychain.
+  /// Called when an API-key input loses focus, or when Clear is
+  /// pressed (with an empty value, which deletes). Persists to the OS
+  /// keychain via the parent; doing it on blur rather than onChange
+  /// keeps every keystroke from hammering the keychain.
   onCloudApiKeyCommit: (providerKey: string, value: string) => void;
   // Local model state
   modelPath: string;
@@ -49,18 +58,29 @@ const SIDEBAR_BTN =
 
 function ModelCombobox({
   items,
+  fetched = [],
   value,
   onChange,
   placeholder,
 }: {
+  /// Curated entries from `models.json`, in their catalog order —
+  /// which is the point of them: cheapest/default first.
   items: string[];
+  /// Everything the provider itself reported, minus the curated ones.
+  /// Listed second because the provider's `/v1/models` carries no
+  /// ranking and no chat-capability marker, so it cannot be presented
+  /// as a considered shortlist.
+  fetched?: string[];
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
 }) {
+  // Base UI matches against a flat item list; the groups below are a
+  // presentation layer over the same values.
+  const all = fetched.length ? [...items, ...fetched] : items;
   return (
     <Combobox.Root
-      items={items}
+      items={all}
       inputValue={value}
       onInputValueChange={onChange}
     >
@@ -84,7 +104,9 @@ function ModelCombobox({
                 <Combobox.Item
                   key={item}
                   value={item}
-                  className="cursor-pointer px-2.5 py-1.5 hover:bg-bg-soft data-[highlighted]:bg-accent-soft"
+                  className={`cursor-pointer px-2.5 py-1.5 hover:bg-bg-soft data-[highlighted]:bg-accent-soft ${
+                    fetched.includes(item) ? "text-fg-dim" : ""
+                  }`}
                 >
                   {item}
                 </Combobox.Item>
@@ -94,6 +116,121 @@ function ModelCombobox({
         </Combobox.Positioner>
       </Combobox.Portal>
     </Combobox.Root>
+  );
+}
+
+/// One dim line under the model field saying where the list came from,
+/// plus a refresh. Deliberately quiet: the curated list works offline
+/// and the field is free text, so a failed fetch is a non-event and
+/// must not read like a broken app.
+function ModelCatalogNote({
+  catalog,
+  onRefresh,
+}: {
+  catalog?: ModelCatalog;
+  onRefresh: () => void;
+}) {
+  const extra = catalog?.fetched.length ?? 0;
+  let text: string;
+  if (!catalog) text = "recommended models";
+  else if (catalog.source === "recommendedOnly")
+    text = catalog.error ? "recommended only (provider list unavailable)" : "recommended models";
+  else if (catalog.source === "staleCache")
+    text = `+${extra} from provider (cached, refresh failed)`;
+  else text = `+${extra} from provider`;
+
+  return (
+    <div className="flex items-center gap-2 text-[11px] text-fg-dim">
+      <span title={catalog?.error ?? undefined}>{text}</span>
+      <button
+        type="button"
+        className="cursor-pointer border-none bg-transparent p-0 text-fg-dim underline"
+        onClick={onRefresh}
+      >
+        Refresh
+      </button>
+    </div>
+  );
+}
+
+/// Write-only API-key input.
+///
+/// There is no read path: the backend resolves keys itself and the
+/// webview never receives one. So the field starts empty and shows
+/// whether a key is *stored* rather than what it is. Typing replaces
+/// it; clearing and blurring deletes it.
+function ApiKeyField({
+  providerKey,
+  envVar,
+  saved,
+  onCommit,
+  setKeySaved,
+  optional = false,
+}: {
+  providerKey: string;
+  envVar?: string;
+  saved: boolean;
+  onCommit: (key: string, value: string) => void;
+  setKeySaved: (
+    fn: (prev: Record<string, boolean>) => Record<string, boolean>,
+  ) => void;
+  optional?: boolean;
+}) {
+  const [draft, setDraft] = useState("");
+
+  function commit() {
+    const v = draft.trim();
+    // An untouched field must not wipe a stored key — only an explicit
+    // clear does, and that is what the Clear button is for.
+    if (!v) return;
+    onCommit(providerKey, v);
+    setKeySaved((prev) => ({ ...prev, [providerKey]: true }));
+    setDraft("");
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <input
+        className={INPUT}
+        type="password"
+        autoComplete="off"
+        value={draft}
+        onChange={(e) => setDraft(e.currentTarget.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.currentTarget.blur();
+          }
+        }}
+        placeholder={saved ? "API key saved — type to replace" : "API key"}
+      />
+      <div className="flex items-center gap-2 text-[11px]">
+        {saved ? (
+          <>
+            <span className="text-success">key configured</span>
+            <button
+              type="button"
+              className="cursor-pointer border-none bg-transparent p-0 text-fg-dim underline"
+              onClick={() => {
+                onCommit(providerKey, "");
+                setKeySaved((prev) => ({ ...prev, [providerKey]: false }));
+                setDraft("");
+              }}
+            >
+              Clear
+            </button>
+          </>
+        ) : (
+          <span className={optional ? "text-fg-dim" : "text-danger"}>
+            {optional
+              ? "optional for local servers"
+              : envVar
+                ? `no key — save one here or export ${envVar}`
+                : "no key"}
+          </span>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -108,8 +245,10 @@ export function RightSidebar(props: Props) {
     setCloudModel,
     cloudBaseUrl,
     setCloudBaseUrl,
-    cloudApiKey,
-    setCloudApiKey,
+    modelCatalog,
+    onRefreshModels,
+    keySaved,
+    setKeySaved,
     onCloudApiKeyCommit,
     modelPath,
     setModelPath,
@@ -159,10 +298,19 @@ export function RightSidebar(props: Props) {
             ...cloudProviders.map((p) => ({ value: p.key, label: p.label })),
           ]}
         />
-        {activeCloud && !activeCloud.apiKeySet && (
-          <div className="text-[12px] text-danger">
-            {activeCloud.envVar} not set
-          </div>
+        {activeCloud && !activeCloud.userConfigurable && (
+          // Named providers get a real input, not just a notice. This
+          // used to say "<ENV_VAR> not set" with nothing to do about
+          // it — which was a dead end for anyone running a packaged
+          // build, since a GUI launched from the dock never sees a
+          // shell export.
+          <ApiKeyField
+            providerKey={activeCloud.key}
+            envVar={activeCloud.envVar}
+            saved={keySaved[activeCloud.key] ?? activeCloud.apiKeySet}
+            onCommit={onCloudApiKeyCommit}
+            setKeySaved={setKeySaved}
+          />
         )}
       </Section>
 
@@ -219,20 +367,12 @@ export function RightSidebar(props: Props) {
                 }
                 placeholder="base URL (e.g. http://localhost:11434/v1)"
               />
-              <input
-                className={INPUT}
-                type="password"
-                value={cloudApiKey[activeCloud.key] ?? ""}
-                onChange={(e) =>
-                  setCloudApiKey((prev) => ({
-                    ...prev,
-                    [activeCloud.key]: e.currentTarget.value,
-                  }))
-                }
-                onBlur={(e) =>
-                  onCloudApiKeyCommit(activeCloud.key, e.currentTarget.value)
-                }
-                placeholder="API key (saved to keychain)"
+              <ApiKeyField
+                providerKey={activeCloud.key}
+                saved={keySaved[activeCloud.key] ?? false}
+                onCommit={onCloudApiKeyCommit}
+                setKeySaved={setKeySaved}
+                optional
               />
             </div>
           ) : (
@@ -241,15 +381,22 @@ export function RightSidebar(props: Props) {
             // filter / popup state across provider switches and the
             // dropdown needs two chevron clicks to surface the new
             // provider's model list.
-            <ModelCombobox
-              key={activeCloud.key}
-              items={activeCloud.recommendedModels}
-              value={cloudModel[activeCloud.key] ?? ""}
-              onChange={(v) =>
-                setCloudModel((prev) => ({ ...prev, [activeCloud.key]: v }))
-              }
-              placeholder={activeCloud.defaultModel}
-            />
+            <div className="flex flex-col gap-1">
+              <ModelCombobox
+                key={activeCloud.key}
+                items={activeCloud.recommendedModels}
+                fetched={modelCatalog?.fetched ?? []}
+                value={cloudModel[activeCloud.key] ?? ""}
+                onChange={(v) =>
+                  setCloudModel((prev) => ({ ...prev, [activeCloud.key]: v }))
+                }
+                placeholder={activeCloud.defaultModel}
+              />
+              <ModelCatalogNote
+                catalog={modelCatalog}
+                onRefresh={onRefreshModels}
+              />
+            </div>
           )
         ) : null}
       </Section>

@@ -30,6 +30,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::agent::delta::{AgentDelta, FinishReason, StreamStats};
 use crate::agent::tool::ToolCall;
+use crate::secrets::{cloud_api_key_account, KeyringStore, SecretStore};
 
 const N_CTX: u32 = 4096;
 const MAX_NEW_TOKENS: i32 = 1024;
@@ -62,9 +63,27 @@ pub struct LlmState {
     cancel: Arc<AtomicBool>,
 }
 
+/// Lock a `LlmState` mutex, recovering from poisoning.
+///
+/// These mutexes guard handles — an `Arc<LlamaBackend>` and a
+/// `LoadedHandle` — not a multi-field invariant that a panic could
+/// leave half-updated. So poisoning here carries no information: the
+/// data is exactly as valid as it was before whichever unrelated panic
+/// happened to occur while the guard was held.
+///
+/// `.lock().unwrap()` was the previous behaviour, and its failure mode
+/// is bad out of proportion to the cause: one panic anywhere in the
+/// process while a guard is held makes *every* subsequent local
+/// inference call panic for the rest of the session, with no way back
+/// short of restarting the app. Recovering via `into_inner` keeps the
+/// model usable.
+fn lock_recover<T>(m: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 impl LlmState {
     fn ensure_backend(&self) -> Result<Arc<LlamaBackend>> {
-        let mut guard = self.backend.lock().unwrap();
+        let mut guard = lock_recover(&self.backend);
         if let Some(b) = guard.as_ref() {
             return Ok(b.clone());
         }
@@ -84,7 +103,7 @@ impl LlmState {
 
     /// Snapshot of the currently-loaded model.
     pub fn status(&self) -> ModelStatus {
-        let guard = self.loaded.lock().unwrap();
+        let guard = lock_recover(&self.loaded);
         match guard.as_ref() {
             Some(l) => ModelStatus {
                 loaded: true,
@@ -122,7 +141,7 @@ impl LlmState {
     ) -> std::result::Result<UnboundedReceiver<std::result::Result<AgentDelta, String>>, String>
     {
         let sender = {
-            let g = self.loaded.lock().unwrap();
+            let g = lock_recover(&self.loaded);
             g.as_ref()
                 .ok_or_else(|| "no model loaded".to_string())?
                 .sender
@@ -151,7 +170,7 @@ impl LlmState {
         sink: Arc<dyn ChatSink>,
     ) -> Result<String, String> {
         let sender = {
-            let guard = self.loaded.lock().unwrap();
+            let guard = lock_recover(&self.loaded);
             guard
                 .as_ref()
                 .ok_or_else(|| "no model loaded".to_string())?
@@ -194,7 +213,7 @@ impl LlmState {
         let (sender, join) = spawn_worker(model, backend);
         self.cancel.store(true, Ordering::Relaxed);
         {
-            let mut guard = self.loaded.lock().unwrap();
+            let mut guard = lock_recover(&self.loaded);
             *guard = Some(LoadedHandle {
                 path: path.clone(),
                 sender: Some(sender),
@@ -213,13 +232,16 @@ impl LlmState {
         // sets are alive on the metal device. So drop the worker (which
         // joins the thread and releases the LlamaContext) before
         // dropping the backend Arc.
+        //
+        // These also go through `lock_recover` rather than skipping on
+        // a poisoned lock. Silently doing nothing here is the worst
+        // available option: a panic elsewhere is exactly the situation
+        // where the teardown ordering still has to happen, and skipping
+        // it trades a recoverable poison for the `GGML_ASSERT` abort at
+        // process exit.
         self.cancel.store(true, Ordering::Relaxed);
-        if let Ok(mut g) = self.loaded.lock() {
-            *g = None;
-        }
-        if let Ok(mut g) = self.backend.lock() {
-            *g = None;
-        }
+        *lock_recover(&self.loaded) = None;
+        *lock_recover(&self.backend) = None;
     }
 }
 
@@ -368,40 +390,149 @@ pub fn cloud_provider_def(key: &str) -> Option<&'static CloudProviderDef> {
     cloud_providers_catalog().iter().find(|p| p.key == key)
 }
 
-/// Resolve api_key + base_url + model for a non-`local` provider.
-pub fn resolve_cloud_config(
-    opts: &ChatOpts,
+/// Borrowed view of the provider-selection fields that cloud
+/// resolution actually needs. `ChatOpts` (plain chat) and the Tauri
+/// agent path's `AgentChatOpts` both carry these four fields plus
+/// their own extras; converting into this view lets both share one
+/// `resolve_cloud_config` rather than keeping two copies in step by
+/// hand.
+#[derive(Debug, Clone, Copy)]
+pub struct CloudConfigInput<'a> {
+    pub provider: &'a str,
+    pub model: Option<&'a str>,
+    pub base_url: Option<&'a str>,
+    pub api_key: Option<&'a str>,
+}
+
+impl<'a> From<&'a ChatOpts> for CloudConfigInput<'a> {
+    fn from(o: &'a ChatOpts) -> Self {
+        CloudConfigInput {
+            provider: &o.provider,
+            model: o.model.as_deref(),
+            base_url: o.base_url.as_deref(),
+            api_key: o.api_key.as_deref(),
+        }
+    }
+}
+
+/// Where a resolved API key came from. Reported so a UI can say
+/// *which* source answered rather than just "configured".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySource {
+    /// Passed explicitly for this request (TUI `--api-key`, or the
+    /// `other` provider's runtime field).
+    Runtime,
+    /// OS credential store.
+    Keychain,
+    /// Process environment, which includes anything a `.env` loaded.
+    Environment,
+    /// No key was found and none was needed — the `other` provider
+    /// pointed at a local server that wants no auth.
+    None,
+}
+
+/// Look up a cloud provider's API key.
+///
+/// Precedence is runtime override, then keychain, then environment,
+/// and the order is deliberate:
+///
+/// * **Runtime** first because it is the most explicit thing the user
+///   can do — a `--api-key` flag should not be silently overruled by
+///   something saved months ago.
+/// * **Keychain** before environment because it is the only source a
+///   *packaged* GUI can actually read. An app launched from Finder,
+///   the dock, or a `.desktop` entry never runs a shell profile, so
+///   `~/.zshrc` exports are invisible to it. Reading only the
+///   environment (the previous behaviour) meant an installed build
+///   could not be given a key at all.
+/// * **Environment** last, so terminal launches, `make dev`, CI, and
+///   `.env` files all keep working unchanged. It is the developer
+///   path and stays fully supported; it is just no longer the *only*
+///   path.
+///
+/// A keychain that is locked or unavailable yields `None` rather than
+/// an error, so the environment still gets its turn.
+pub fn lookup_api_key(
+    provider_key: &str,
+    env_var: &str,
+    runtime: Option<&str>,
+    store: &dyn SecretStore,
+) -> Option<(String, KeySource)> {
+    if let Some(k) = runtime.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some((k.to_string(), KeySource::Runtime));
+    }
+    if let Some(k) = store
+        .get(&cloud_api_key_account(provider_key))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some((k, KeySource::Keychain));
+    }
+    if !env_var.is_empty() {
+        if let Some(k) = std::env::var(env_var)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return Some((k, KeySource::Environment));
+        }
+    }
+    None
+}
+
+/// Resolve api_key + base_url + model for a non-`local` provider,
+/// consulting the real OS credential store.
+///
+/// Takes anything convertible into `CloudConfigInput`, so callers
+/// keep passing their own options struct by reference.
+pub fn resolve_cloud_config<'a>(
+    opts: impl Into<CloudConfigInput<'a>>,
 ) -> std::result::Result<(String, String, String), String> {
-    let def = cloud_provider_def(&opts.provider)
+    resolve_cloud_config_with(opts, &KeyringStore)
+}
+
+/// `resolve_cloud_config` with an injectable secret store.
+///
+/// Tests use this so they neither read nor depend on the state of the
+/// developer's login keychain.
+pub fn resolve_cloud_config_with<'a>(
+    opts: impl Into<CloudConfigInput<'a>>,
+    store: &dyn SecretStore,
+) -> std::result::Result<(String, String, String), String> {
+    let opts: CloudConfigInput<'a> = opts.into();
+    let def = cloud_provider_def(opts.provider)
         .ok_or_else(|| format!("unknown provider: {}", opts.provider))?;
+
+    let found = lookup_api_key(&def.key, &def.env_var, opts.api_key, store);
 
     let (api_key, base_url) = if def.user_configurable {
         let base_url = opts
             .base_url
-            .as_ref()
-            .map(|s| s.trim())
+            .map(str::trim)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| "base URL is required".to_string())?
             .to_string();
-        let api_key = opts
-            .api_key
-            .clone()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+        // A user-configured endpoint is usually a local server that
+        // wants no auth, so an absent key is normal here.
+        let api_key = found
+            .map(|(k, _)| k)
             .unwrap_or_else(|| "no-key".to_string());
         (api_key, base_url)
     } else {
-        let api_key = std::env::var(&def.env_var)
-            .ok()
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| format!("{} is not set", &def.env_var))?;
+        let (api_key, _src) = found.ok_or_else(|| {
+            format!(
+                "no API key for {}: set it in Settings, or export {}",
+                def.label, def.env_var
+            )
+        })?;
         (api_key, def.base_url.clone())
     };
 
     let model = opts
         .model
-        .clone()
-        .filter(|s| !s.trim().is_empty())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
         .or_else(|| {
             if def.default_model.is_empty() {
                 None
@@ -532,9 +663,7 @@ async fn run_cloud_chat(
     if let Some(n) = sampler.max_tokens {
         builder.max_tokens(n.max(1));
     }
-    let request = builder
-        .build()
-        .map_err(|e| format!("build request: {e}"))?;
+    let request = builder.build().map_err(|e| format!("build request: {e}"))?;
 
     let cfg = OpenAIConfig::new()
         .with_api_key(api_key)
@@ -1046,6 +1175,7 @@ fn oai_delta_to_agent_deltas(json: &str, emitted_tool_calls: &mut bool) -> Vec<A
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secrets::test_support::MapStore;
     use tempfile::TempDir;
 
     #[test]
@@ -1081,7 +1211,7 @@ mod tests {
             model: Some("foo".into()),
             ..Default::default()
         };
-        let err = resolve_cloud_config(&opts).unwrap_err();
+        let err = resolve_cloud_config_with(&opts, &MapStore::empty()).unwrap_err();
         assert!(err.contains("base URL"), "got: {err}");
     }
 
@@ -1094,7 +1224,7 @@ mod tests {
             // empty key allowed for local OpenAI-compat servers
             ..Default::default()
         };
-        let (key, base, model) = resolve_cloud_config(&opts).unwrap();
+        let (key, base, model) = resolve_cloud_config_with(&opts, &MapStore::empty()).unwrap();
         assert_eq!(key, "no-key");
         assert_eq!(base, "http://localhost:11434/v1");
         assert_eq!(model, "llama3");
@@ -1106,7 +1236,7 @@ mod tests {
             provider: "wat".into(),
             ..Default::default()
         };
-        let err = resolve_cloud_config(&opts).unwrap_err();
+        let err = resolve_cloud_config_with(&opts, &MapStore::empty()).unwrap_err();
         assert!(err.contains("unknown provider"), "got: {err}");
     }
 
@@ -1192,5 +1322,194 @@ mod tests {
         assert!(!json.contains("tool_calls"));
         let back: ChatMsg = serde_json::from_str(&json).unwrap();
         assert_eq!(back.tool_call_id.as_deref(), Some("call-1"));
+    }
+}
+
+#[cfg(test)]
+mod poison_tests {
+    use super::*;
+
+    #[test]
+    fn a_poisoned_lock_is_recovered_rather_than_panicking() {
+        // Previously `.lock().unwrap()`: one panic anywhere while a
+        // guard was held bricked local inference for the rest of the
+        // process. Poison the mutex the way a real panic would, then
+        // confirm the state is still reachable.
+        let m: StdMutex<Option<u32>> = StdMutex::new(Some(7));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = m.lock().unwrap();
+            panic!("poison it");
+        }));
+        assert!(m.is_poisoned(), "test setup did not poison the mutex");
+
+        assert_eq!(*lock_recover(&m), Some(7));
+        *lock_recover(&m) = None;
+        assert_eq!(*lock_recover(&m), None);
+    }
+
+    #[test]
+    fn shutdown_clears_state_through_a_poisoned_lock() {
+        // The shutdown path used `if let Ok(..)`, which skipped the
+        // teardown entirely on poison — trading a recoverable lock for
+        // the ggml-metal exit assert.
+        let state = LlmState::default();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = state.loaded.lock().unwrap();
+            panic!("poison it");
+        }));
+        assert!(state.loaded.is_poisoned());
+
+        state.shutdown();
+        assert!(!state.status().loaded);
+    }
+}
+
+#[cfg(test)]
+mod key_resolution_tests {
+    use super::*;
+    use crate::secrets::test_support::MapStore;
+
+    /// Env-var names used only here, so these tests neither read nor
+    /// clobber a real provider key that happens to be exported.
+    const EV: &str = "REZON_TEST_KEY_VAR";
+
+    fn clear_env() {
+        std::env::remove_var(EV);
+    }
+
+    #[test]
+    fn runtime_override_wins_over_everything() {
+        std::env::set_var(EV, "from-env");
+        let store = MapStore::with("api_key:openai", "from-keychain");
+        let got = lookup_api_key("openai", EV, Some("from-flag"), &store);
+        assert_eq!(got, Some(("from-flag".to_string(), KeySource::Runtime)));
+        clear_env();
+    }
+
+    #[test]
+    fn keychain_wins_over_environment() {
+        // The load-bearing rule. A packaged GUI never runs a shell
+        // profile, so the keychain has to be reachable ahead of the
+        // environment or an installed build cannot be given a key.
+        std::env::set_var(EV, "from-env");
+        let store = MapStore::with("api_key:openai", "from-keychain");
+        let got = lookup_api_key("openai", EV, None, &store);
+        assert_eq!(
+            got,
+            Some(("from-keychain".to_string(), KeySource::Keychain))
+        );
+        clear_env();
+    }
+
+    #[test]
+    fn environment_still_answers_when_nothing_is_stored() {
+        // The dev path, which must keep working untouched: terminal
+        // launches, `make dev`, CI, and anything a `.env` loaded.
+        std::env::set_var(EV, "from-env");
+        let got = lookup_api_key("openai", EV, None, &MapStore::empty());
+        assert_eq!(got, Some(("from-env".to_string(), KeySource::Environment)));
+        clear_env();
+    }
+
+    #[test]
+    fn nothing_anywhere_yields_none() {
+        clear_env();
+        assert_eq!(lookup_api_key("openai", EV, None, &MapStore::empty()), None);
+    }
+
+    #[test]
+    fn blank_and_whitespace_only_values_are_ignored_at_every_level() {
+        // An empty env var or a keychain entry holding only spaces is
+        // "not set", not a key. Treating it as one produces a 401 that
+        // looks like a provider outage.
+        std::env::set_var(EV, "   ");
+        let store = MapStore::with("api_key:openai", "  ");
+        assert_eq!(lookup_api_key("openai", EV, Some("  "), &store), None);
+        clear_env();
+    }
+
+    #[test]
+    fn values_are_trimmed() {
+        // Keys pasted into a UI routinely carry a trailing newline.
+        let store = MapStore::with("api_key:openai", "  sk-abc\n");
+        let (k, _) = lookup_api_key("openai", EV, None, &store).unwrap();
+        assert_eq!(k, "sk-abc");
+    }
+
+    #[test]
+    fn a_provider_with_no_env_var_skips_the_environment_entirely() {
+        // `other` has `envVar: ""`. Looking that up would read a
+        // nonsense variable name.
+        assert_eq!(lookup_api_key("other", "", None, &MapStore::empty()), None);
+    }
+
+    #[test]
+    fn keys_are_namespaced_per_provider() {
+        let store = MapStore::with("api_key:openai", "openai-key");
+        assert!(lookup_api_key("openai", "", None, &store).is_some());
+        assert!(lookup_api_key("anthropic", "", None, &store).is_none());
+    }
+
+    // ---- End to end through resolve_cloud_config --------------------
+
+    #[test]
+    fn a_named_provider_resolves_from_the_keychain_with_no_env_var_set() {
+        // The bug this whole change exists to fix: before, this path
+        // read only `OPENAI_API_KEY` and a packaged app could not be
+        // given a key at all.
+        std::env::remove_var("OPENAI_API_KEY");
+        let opts = ChatOpts {
+            provider: "openai".into(),
+            model: Some("gpt-5.4-nano".into()),
+            ..Default::default()
+        };
+        let store = MapStore::with("api_key:openai", "sk-from-keychain");
+        let (key, base, model) = resolve_cloud_config_with(&opts, &store).unwrap();
+        assert_eq!(key, "sk-from-keychain");
+        assert_eq!(base, "https://api.openai.com/v1");
+        assert_eq!(model, "gpt-5.4-nano");
+    }
+
+    #[test]
+    fn a_named_provider_with_no_key_anywhere_names_both_remedies() {
+        std::env::remove_var("OPENAI_API_KEY");
+        let opts = ChatOpts {
+            provider: "openai".into(),
+            model: Some("gpt-5.4-nano".into()),
+            ..Default::default()
+        };
+        let err = resolve_cloud_config_with(&opts, &MapStore::empty()).unwrap_err();
+        // The old message named only the env var, which was also the
+        // only thing that worked. Both paths exist now, so say so.
+        assert!(err.contains("Settings"), "got: {err}");
+        assert!(err.contains("OPENAI_API_KEY"), "got: {err}");
+    }
+
+    #[test]
+    fn the_other_provider_still_falls_back_to_no_key() {
+        // Local servers (Ollama, LM Studio) want no auth; an absent
+        // key must not be an error there.
+        let opts = ChatOpts {
+            provider: "other".into(),
+            model: Some("llama3".into()),
+            base_url: Some("http://localhost:11434/v1".into()),
+            ..Default::default()
+        };
+        let (key, base, _) = resolve_cloud_config_with(&opts, &MapStore::empty()).unwrap();
+        assert_eq!(key, "no-key");
+        assert_eq!(base, "http://localhost:11434/v1");
+    }
+
+    #[test]
+    fn the_other_provider_uses_a_stored_key_when_there_is_one() {
+        let opts = ChatOpts {
+            provider: "other".into(),
+            model: Some("m".into()),
+            base_url: Some("https://gateway.example/v1".into()),
+            ..Default::default()
+        };
+        let store = MapStore::with("api_key:other", "gateway-token");
+        let (key, _, _) = resolve_cloud_config_with(&opts, &store).unwrap();
+        assert_eq!(key, "gateway-token");
     }
 }

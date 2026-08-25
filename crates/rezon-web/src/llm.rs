@@ -127,10 +127,10 @@ fn expand_send_msgs(vault: &str, msgs: &mut [ChatMsg], app: &AppHandle) {
 fn expand_field(vault: &str, text: &str, app: &AppHandle) -> String {
     let r = rezon_core::wikilink::expand(vault, text);
     if !r.unresolved.is_empty() {
-        let _ = app.emit("chat-warning", format!(
-            "wikilink unresolved: {}",
-            r.unresolved.join(", ")
-        ));
+        let _ = app.emit(
+            "chat-warning",
+            format!("wikilink unresolved: {}", r.unresolved.join(", ")),
+        );
     }
     r.text
 }
@@ -155,10 +155,18 @@ impl From<&CloudProviderDef> for CloudProviderInfo {
             env_var: p.env_var.clone(),
             default_model: p.default_model.clone(),
             recommended_models: p.recommended_models.clone(),
+            // Reflects the real resolution chain (keychain, then
+            // environment), not just the env var. Reporting only the
+            // latter is what made the sidebar claim "OPENAI_API_KEY not
+            // set" for a user who had saved a key perfectly well.
             api_key_set: p.user_configurable
-                || std::env::var(&p.env_var)
-                    .map(|v| !v.is_empty())
-                    .unwrap_or(false),
+                || llm::lookup_api_key(
+                    &p.key,
+                    &p.env_var,
+                    None,
+                    &rezon_core::secrets::KeyringStore,
+                )
+                .is_some(),
             user_configurable: p.user_configurable,
         }
     }
@@ -170,4 +178,70 @@ pub fn cloud_providers() -> Vec<CloudProviderInfo> {
         .iter()
         .map(CloudProviderInfo::from)
         .collect()
+}
+
+/// A provider's model list: curated entries plus whatever the provider
+/// itself reports, with a note on where the latter came from.
+///
+/// Never fails. The curated list is always a usable answer, so a fetch
+/// problem downgrades `source` and fills `error` rather than erroring
+/// the command — the dropdown stays populated and the field is free
+/// text regardless.
+#[tauri::command]
+pub async fn provider_models(
+    provider: String,
+    refresh: bool,
+) -> Result<rezon_core::model_catalog::Catalog, String> {
+    use rezon_core::model_catalog as mc;
+
+    let def = llm::cloud_provider_def(&provider)
+        .ok_or_else(|| format!("unknown provider: {provider}"))?;
+    let recommended: Vec<String> = def.recommended_models.clone();
+
+    // `user_configurable` providers have no catalog entry to fall back
+    // on and their base URL only exists at runtime, so they are not
+    // fetched here; the caller passes the URL explicitly if it wants a
+    // list for one.
+    if def.user_configurable || def.base_url.is_empty() {
+        return Ok(mc::Catalog {
+            recommended,
+            fetched: Vec::new(),
+            source: mc::CatalogSource::RecommendedOnly,
+            fetched_at: None,
+            error: None,
+        });
+    }
+
+    let api_key = llm::lookup_api_key(
+        &def.key,
+        &def.env_var,
+        None,
+        &rezon_core::secrets::KeyringStore,
+    )
+    .map(|(k, _)| k);
+
+    let Some(path) = mc::cache_path() else {
+        // No config dir: fetch without persisting rather than refusing.
+        return Ok(mc::resolve_catalog(
+            &def.key,
+            &def.base_url,
+            api_key.as_deref(),
+            &recommended,
+            std::path::Path::new(""),
+            refresh,
+            mc::DEFAULT_TTL_SECS,
+        )
+        .await);
+    };
+
+    Ok(mc::resolve_catalog(
+        &def.key,
+        &def.base_url,
+        api_key.as_deref(),
+        &recommended,
+        &path,
+        refresh,
+        mc::DEFAULT_TTL_SECS,
+    )
+    .await)
 }

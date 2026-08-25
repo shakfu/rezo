@@ -24,7 +24,7 @@ pub fn register_core_tools(reg: &mut ToolRegistry) {
     reg.register(Arc::new(current_time::CurrentTime));
     reg.register(Arc::new(file_read::FileRead));
     reg.register(Arc::new(web_fetch::WebFetch));
-    reg.register(Arc::new(shell_exec::ShellExec));
+    reg.register(Arc::new(shell_exec::ShellExec::default()));
 }
 
 /// Register `search_notes`, which needs the shared SearchState +

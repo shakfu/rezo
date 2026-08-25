@@ -5,6 +5,107 @@ All notable changes to this project. Format loosely follows
 
 ## [Unreleased]
 
+### Security
+- **Confirmation floor.** `Tool::requires_confirmation()` was never
+  consulted; policy came entirely from a frontend-supplied map, so
+  anything able to call `agent_chat` could auto-approve `shell_exec`.
+  The rule now lives in `agent::confirm::decide` and only a
+  backend-recorded grant clears the floor. `"disable"` still honoured
+  at face value. 12-row decision table under test.
+- **Vault symlink escape.** `vault::within` compared lexically, so a
+  symlink inside the vault pointing out of it passed and `fs::write`
+  followed. `resolve_path` walks the path resolving symlinks as it
+  goes — forwards, so `..` after a link lands where the kernel puts it,
+  not where string-cancellation would. Root canonicalized too (a macOS
+  home is usually itself a symlink). Links staying inside still work.
+- **CSP set** (was `null`): `default-src 'self'`, `object-src 'none'`,
+  `frame-ancestors 'none'`, IPC-only `connect-src`. `style-src` keeps
+  `'unsafe-inline'` for React/Tailwind; `font-src` allows `data:`
+  because KaTeX inlines a face and blocks math without it.
+- **Keys write-only from the frontend**: `keychain_get` →
+  `keychain_has`, no `apiKey` on the chat payload, no plaintext key in
+  the webview.
+- **`web_fetch` stops at cross-host redirects**, returning the 3xx with
+  `redirectedTo`. Same-host hops still follow. Chasing them fetched a
+  destination the user never approved.
+
+### Added
+- **Agent test doubles** (`agent/testing.rs`, `cfg(test)`):
+  `ScriptedProvider`, `RecordingSink`, `ScriptedGate`, `FakeTool` —
+  drive `run_agent` with no model, network, or GGUF.
+- **`.env` loading** (`core/dotenv.rs`), both shells: cwd-upward, then
+  `<app config dir>/.env` for packaged builds. Exported variables win
+  over both.
+- **`rezon_core::secrets`** — credential store moved out of the Tauri
+  shell so `rezon-tui` shares it; a `SecretStore` trait keeps key
+  resolution testable without the real keychain.
+- **`llm::lookup_api_key` + `KeySource`** — runtime → keychain →
+  environment.
+- **`grant_tool_always` / `revoke_tool_always` / `tool_always_grants`**
+  commands, and "Always allow" in the confirm dialog. Grants are
+  process-local, not persisted.
+- **API-key field for named providers** in the sidebar, replacing a
+  `<ENV_VAR> not set` notice that offered no way to act on it.
+- **CI** (`.github/workflows/ci.yml`); `make typecheck` and `make ci`.
+- **Tests: 112 → 218**, covering `run_agent`, `cloud.rs`, `shell_exec`
+  (including the orphan kill `process_group(0)` exists for),
+  `web_fetch`, `file_read`, vault containment, gate policy, and key
+  resolution.
+- **README**: agent-tools table, confirmation policy, API keys.
+
+### Changed
+- **`resolve_cloud_config` deduplicated** — `rezon-web` carried a
+  byte-identical copy. Core's now takes
+  `impl Into<CloudConfigInput<'a>>`, so call sites are unchanged.
+- **Conversation persistence debounced** (400 ms). It ran per streamed
+  token, each one a `JSON.stringify` over the whole conversation set
+  plus a synchronous write. Flushes at end-of-turn, `beforeunload`,
+  unmount.
+- **`web_fetch` caps during the read** (`bytes_stream`, `MAX_BYTES + 1`
+  so the boundary is decidable); URL parsed rather than
+  prefix-matched; client built once.
+- **`file_read` bounds the read** and refuses directories and
+  non-regular files — a FIFO previously hung forever. `size` is now
+  bytes returned; true length moved to `fileSize`.
+- **`rezon-tui` honours per-tool policy** — it prompted for every call,
+  `current_time` included. Same `decide` table as the GUI, and it
+  gained the `Disable` handling it never had.
+- **`[workspace.package]`** is the single source for version, edition,
+  license, repository; all five version strings now read 0.1.1.
+- **`make test` includes `fmt --check`** — which surfaced 60 hunks of
+  pre-existing drift, cleared in a separate mechanical pass.
+- **`shell_exec` timeout is a field** (`Default` = 60s) so the overrun
+  path is testable in milliseconds.
+
+### Fixed
+- **`make test` was red on `main`** — two
+  `useless_borrows_in_formatting` errors, one in each copy of the
+  duplicated resolver.
+- **Mid-stream provider errors discarded the partial turn.**
+  `run_agent` bailed with `?`, dropping content already on screen and
+  leaving `messages` without the assistant turn, so the next request
+  disagreed with the display. Now assembles the partial turn, emits
+  `AgentEvent::Error`, then returns.
+- **Named-provider API keys were unusable in a packaged build.**
+  Resolution read only the env var, and a GUI launched from Finder or
+  the dock never runs a shell profile — so the key was invisible and
+  the sidebar offered no input. Keychain now precedes environment;
+  environment still serves terminal launches, `make dev`, and CI.
+- **`LlmState` poisoning bricked local inference** — one panic under a
+  guard made every later call panic. `lock_recover` recovers via
+  `into_inner()`. Shutdown used `if let Ok(..)`, skipping teardown
+  precisely when the ggml-metal drop ordering still had to happen.
+- **Vite watched the Rust tree.** The scaffold's `src-tauri` ignore
+  path does not exist here, so `crates/` and `target/` were watched.
+- **Vault containment errors** now name the resolved path, not just the
+  literal one — which read as nonsense for a symlink.
+
+### Removed
+- Unreachable agent scaffolding: `ToolError::Denied`,
+  `ToolError::Cancelled`, `ToolResult`, `AgentEvent::ToolConfirm`,
+  `ToolContext.workdir`. None caught by `-D warnings`, all being `pub`.
+- `keychain_get`, replaced by `keychain_has`.
+
 ### Added
 - **Vault redo** (`crates/rezon-core/src/journal.rs::redo_last_op`).
   Reapplies the most-recent `Op::Undo`: restores its `before_sha`

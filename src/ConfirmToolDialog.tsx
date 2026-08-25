@@ -64,9 +64,16 @@ export function DiffPreview({ text }: { text: string }) {
 export function ConfirmToolDialog({
   pending,
   onResolve,
+  onAlwaysAllow,
 }: {
   pending: PendingConfirm | null;
   onResolve: (id: string, approved: boolean) => void;
+  /// Approve this call *and* record a standing grant for the tool, so
+  /// it stops prompting. Routed to the `grant_tool_always` command
+  /// rather than the frontend permission map: for tools that declare
+  /// `requires_confirmation()`, the backend only honors a grant it
+  /// recorded itself. See `TauriConfirmationGate`.
+  onAlwaysAllow: (name: string) => void;
 }) {
   if (!pending) return null;
 
@@ -134,8 +141,9 @@ export function ConfirmToolDialog({
               </div>
             )}
             <div className="text-[11px] text-fg-dim">
-              Use Settings &rsaquo; Tools to set this tool to "Always" if you
-              don't want to be asked again.
+              "Always allow" stops the prompts for{" "}
+              <code className="font-mono">{pending.name}</code> until rezon
+              restarts. Grants are not saved to disk.
             </div>
           </div>
           <div className="flex justify-end gap-2 border-t border-border-soft px-4 py-3">
@@ -145,6 +153,16 @@ export function ConfirmToolDialog({
               onClick={() => onResolve(pending.confirmationId, false)}
             >
               Deny
+            </button>
+            <button
+              type="button"
+              className="cursor-pointer rounded-md border border-border bg-transparent px-3 py-1.5 text-[13px] text-fg hover:bg-bg-soft"
+              onClick={() => {
+                onAlwaysAllow(pending.name);
+                onResolve(pending.confirmationId, true);
+              }}
+            >
+              Always allow
             </button>
             <button
               type="button"

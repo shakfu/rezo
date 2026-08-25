@@ -1,17 +1,29 @@
 [package]
 name = "rezon-core"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 anyhow = "1.0.102"
-async-openai = { version = "0.36", features = ["chat-completion"] }
+# `model` adds the /v1/models listing used by `model_catalog`.
+async-openai = { version = "0.36", features = ["chat-completion", "model"] }
 async-trait = "0.1"
 encoding_rs = "0.8.35"
+# Loads a .env file for development launches; see `dotenv.rs`.
+dotenvy = "0.15"
 futures = "0.3"
+# OS-native credential storage for cloud API keys. macOS Keychain,
+# Windows Credential Manager, secret-service on Linux. Lives in core
+# rather than the Tauri shell so `rezon-tui` gets the same store —
+# key resolution is backend policy, not a GUI concern.
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-sync-persistent"] }
 llama-cpp-2 = { version = "0.1.146", features = ["metal"] }
 notify = "6"
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "charset"] }
+# `stream` powers web_fetch's incremental body read, which stops at the
+# size cap instead of buffering the whole response first.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "charset", "stream"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -25,3 +37,6 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# `net` is test-only: web_fetch's body-cap tests serve responses from a
+# throwaway TcpListener rather than reaching the network.
+tokio = { version = "1", features = ["net", "rt-multi-thread"] }

@@ -51,7 +51,13 @@ pub fn vault_write(
     // so the UI can show a toast. The write itself already
     // succeeded — this is a notice, not an error.
     let rel = relativize(&vault, &path);
-    match journal::record_write(&vault, "manual_edit", &rel, before.as_deref(), Some(&after_bytes)) {
+    match journal::record_write(
+        &vault,
+        "manual_edit",
+        &rel,
+        before.as_deref(),
+        Some(&after_bytes),
+    ) {
         Ok(out) => {
             if let Some(w) = out.git_warning {
                 let _ = app.emit("vault-warning", format!("git: {w}"));
@@ -72,8 +78,7 @@ pub fn vault_write(
 /// without changing this command's return shape.
 #[tauri::command]
 pub fn vault_undo(app: AppHandle, vault: String) -> Result<UndoReport, String> {
-    let out = journal::undo_last_op(&vault)?
-        .ok_or_else(|| "nothing to undo".to_string())?;
+    let out = journal::undo_last_op(&vault)?.ok_or_else(|| "nothing to undo".to_string())?;
     if let Some(w) = out.journal.git_warning {
         let _ = app.emit("vault-warning", format!("git: {w}"));
     }
@@ -89,8 +94,7 @@ pub fn vault_undo(app: AppHandle, vault: String) -> Result<UndoReport, String> {
 /// the UI can refresh open editors / the file tree.
 #[tauri::command]
 pub fn vault_redo(app: AppHandle, vault: String) -> Result<RedoReport, String> {
-    let out = journal::redo_last_op(&vault)?
-        .ok_or_else(|| "nothing to redo".to_string())?;
+    let out = journal::redo_last_op(&vault)?.ok_or_else(|| "nothing to redo".to_string())?;
     if let Some(w) = out.journal.git_warning {
         let _ = app.emit("vault-warning", format!("git: {w}"));
     }
@@ -147,7 +151,10 @@ pub struct JournalEntryDto {
 impl From<journal::JournalEntry> for JournalEntryDto {
     fn from(e: journal::JournalEntry) -> Self {
         match e.op {
-            journal::Op::Write { before_sha, after_sha } => Self {
+            journal::Op::Write {
+                before_sha,
+                after_sha,
+            } => Self {
                 id: e.id,
                 ts: e.ts,
                 tool: e.tool,
@@ -246,12 +253,7 @@ pub fn vault_delete(app: AppHandle, vault: String, path: String) -> Result<(), S
 }
 
 #[tauri::command]
-pub fn vault_rename(
-    app: AppHandle,
-    vault: String,
-    from: String,
-    to: String,
-) -> Result<(), String> {
+pub fn vault_rename(app: AppHandle, vault: String, from: String, to: String) -> Result<(), String> {
     let from_abs = Path::new(&from);
     if !from_abs.exists() {
         return Err(format!("not found: {from}"));
@@ -309,8 +311,7 @@ fn snapshot_dir(vault: &str, dir: &Path) -> Result<Vec<(String, Vec<u8>)>, Strin
     let mut out = Vec::new();
     let mut stack: Vec<std::path::PathBuf> = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let reader = std::fs::read_dir(&d)
-            .map_err(|e| format!("read_dir {:?}: {e}", d))?;
+        let reader = std::fs::read_dir(&d).map_err(|e| format!("read_dir {:?}: {e}", d))?;
         for entry in reader.flatten() {
             let p = entry.path();
             let ft = match entry.file_type() {
@@ -320,8 +321,7 @@ fn snapshot_dir(vault: &str, dir: &Path) -> Result<Vec<(String, Vec<u8>)>, Strin
             if ft.is_dir() {
                 stack.push(p);
             } else if ft.is_file() {
-                let bytes = std::fs::read(&p)
-                    .map_err(|e| format!("read {:?}: {e}", p))?;
+                let bytes = std::fs::read(&p).map_err(|e| format!("read {:?}: {e}", p))?;
                 out.push((relativize(vault, &p.to_string_lossy()), bytes));
             }
         }

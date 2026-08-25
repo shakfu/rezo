@@ -74,6 +74,18 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
+    // Before `Cli::parse`, so `--help` still works if a `.env` is
+    // malformed, and before anything resolves a key.
+    //
+    // Report what was loaded. `dotenvy` walks *up* from the current
+    // directory, so a `.env` in a parent — commonly `~/.env` — supplies
+    // keys to a run started anywhere beneath it. That is useful and
+    // also easy to forget, and "why does it have a key?" is a
+    // genuinely confusing question to debug in silence.
+    let loaded = rezon_core::dotenv::load();
+    for p in &loaded.paths {
+        eprintln!("loaded env from {}", p.display());
+    }
     let cli = Cli::parse();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -104,11 +116,7 @@ async fn run(cli: Cli) -> Result<()> {
     // surprising and could blow past `n_batch` on the first turn. We
     // skip the create when the existing active conv is already empty
     // so the user doesn't accumulate one blank conv per launch.
-    let active_has_user_turns = store
-        .active()
-        .messages
-        .iter()
-        .any(|m| m.role == "user");
+    let active_has_user_turns = store.active().messages.iter().any(|m| m.role == "user");
     if active_has_user_turns {
         store.new_conversation(&default_system);
         // Persist so a crash before the first turn still leaves the
@@ -142,8 +150,9 @@ async fn run(cli: Cli) -> Result<()> {
     //      successfully load a local model — survives across launches
     //      so resuming "the model I was just using" is one-shot.
     // No source → skip auto-load and let the user pick via `/model`.
-    let last_model_path =
-        store::config_dir().ok().and_then(|d| rezon_core::llm::read_last_model(&d));
+    let last_model_path = store::config_dir()
+        .ok()
+        .and_then(|d| rezon_core::llm::read_last_model(&d));
     let local_path: Option<String> = if provider == "local" {
         cli.gguf
             .clone()
@@ -174,9 +183,7 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
     } else if provider == "local" {
-        eprintln!(
-            "note: provider is local but no model loaded — use /model to pick one"
-        );
+        eprintln!("note: provider is local but no model loaded — use /model to pick one");
     }
 
     let chat_opts = ChatOpts {

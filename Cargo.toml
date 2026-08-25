@@ -1,3 +1,16 @@
 [workspace]
 resolver = "2"
 members = ["crates/rezon-web", "crates/rezon-core", "crates/rezon-tui"]
+
+# Single source of truth for the version. Each crate inherits it with
+# `version.workspace = true`, so the three cannot drift apart the way
+# they had (all three said 0.1.0 while package.json said 0.1.1).
+#
+# Still not inherited by `package.json` or `tauri.conf.json` — the
+# bundled app version comes from tauri.conf.json, so all three need
+# bumping together on release.
+[workspace.package]
+version = "0.1.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/shakfu/rezon"
