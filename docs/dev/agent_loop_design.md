@@ -1,11 +1,8 @@
 # Agent Loop and Tool Trait: Design Sketch
 
-A sketch for the rezon agent module. The goal is single-agent,
-multi-tool, streaming, provider-agnostic - covering OpenAI, Anthropic,
-OpenRouter, and local llama-cpp-2 with the same loop.
+A sketch for the rezon agent module. The goal is single-agent, multi-tool, streaming, provider-agnostic - covering OpenAI, Anthropic, OpenRouter, and local llama-cpp-2 with the same loop.
 
-This is a design artifact, not committed code. Type signatures are
-illustrative; names and exact shapes are open for discussion.
+This is a design artifact, not committed code. Type signatures are illustrative; names and exact shapes are open for discussion.
 
 ## Module layout
 
@@ -31,18 +28,13 @@ crates/rezon-web/src/        // Tauri shell
       ...
 ```
 
-`agent` is a sibling of the existing `llm` module. The `llm` module's
-local worker thread is reused; the `agent` module wraps it for the
-tool-aware code path.
+`agent` is a sibling of the existing `llm` module. The `llm` module's local worker thread is reused; the `agent` module wraps it for the tool-aware code path.
 
 ## Core types
 
 ### `AgentDelta` - the normalized stream
 
-Both the cloud adapter and local adapter produce a stream of these.
-The loop is written once against this enum. Modeled on the *intersection*
-of what OpenAI streaming chunks and `ChatParseStateOaicompat` deltas
-provide.
+Both the cloud adapter and local adapter produce a stream of these. The loop is written once against this enum. Modeled on the *intersection* of what OpenAI streaming chunks and `ChatParseStateOaicompat` deltas provide.
 
 ```rust
 pub enum AgentDelta {
@@ -152,9 +144,7 @@ impl ToolRegistry {
 }
 ```
 
-A "tool set" abstraction (e.g. read-only vs read-write, or
-"research mode" vs "code mode") lives one level up: the caller picks
-which tools to register before each agent run.
+A "tool set" abstraction (e.g. read-only vs read-write, or "research mode" vs "code mode") lives one level up: the caller picks which tools to register before each agent run.
 
 ### `Provider` - what every backend implements
 
@@ -178,8 +168,7 @@ pub struct ProviderOpts {
 }
 ```
 
-`ChatMessage` is rezon's existing internal message type, extended with
-`tool_calls` on assistant turns and a `Tool` role for tool results.
+`ChatMessage` is rezon's existing internal message type, extended with `tool_calls` on assistant turns and a `Tool` role for tool results.
 
 ## The loop
 
@@ -303,46 +292,41 @@ async fn consume_stream(
 
 ### Cloud (`cloud.rs`)
 
-Wraps `async-openai`. Maps `ChatCompletionStreamResponseDelta` chunks
-to `AgentDelta`:
+Wraps `async-openai`. Maps `ChatCompletionStreamResponseDelta` chunks to `AgentDelta`:
 
 - `delta.content` -> `AgentDelta::Content`
+
 - `delta.tool_calls[i]` first chunk -> `AgentDelta::ToolCallStart`
+
 - `delta.tool_calls[i]` subsequent chunks -> `AgentDelta::ToolCallArgs`
+
 - `usage` (if `stream_options.include_usage`) -> `AgentDelta::Stats`
+
 - `finish_reason` on the final chunk -> `AgentDelta::Done`
 
 This is a small, mostly mechanical adapter (~150 lines).
 
 ### Local (`local.rs`)
 
-Wraps the existing `llama-cpp-2` worker thread. Validated path from the
-spike (`docs/dev/local_tool_calling.md`):
+Wraps the existing `llama-cpp-2` worker thread. Validated path from the spike (`docs/dev/local_tool_calling.md`):
 
 1. `model.apply_chat_template_with_tools_oaicompat(template, msgs, Some(tools_json), None, true)`
-2. **Skip grammar** until the upstream `GGML_ASSERT` bug is fixed (use
-   plain `temp` + `dist` sampling).
+
+2. **Skip grammar** until the upstream `GGML_ASSERT` bug is fixed (use plain `temp` + `dist` sampling).
+
 3. `result.streaming_state_oaicompat()` for the parser.
+
 4. For each generated token's text: `parse_state.update(piece, true)`.
+
 5. Each returned JSON delta string is parsed and mapped to `AgentDelta`.
 
-Because `ChatParseStateOaicompat` already produces deltas in OpenAI
-shape (verified empirically with Qwen 3), the mapping is symmetric to
-the cloud adapter. They share a `parse_oai_delta(json: &str) -> AgentDelta`
-helper.
+Because `ChatParseStateOaicompat` already produces deltas in OpenAI shape (verified empirically with Qwen 3), the mapping is symmetric to the cloud adapter. They share a `parse_oai_delta(json: &str) -> AgentDelta` helper.
 
-The local adapter exposes the same `Provider` interface but runs the
-heavy work on the worker thread already established in `llm.rs`,
-sending deltas back through an MPSC channel that the adapter wraps as
-a `Stream`.
+The local adapter exposes the same `Provider` interface but runs the heavy work on the worker thread already established in `llm.rs`, sending deltas back through an MPSC channel that the adapter wraps as a `Stream`.
 
 #### Tool-capability gating
 
-If `apply_chat_template_with_tools_oaicompat` returns
-`parse_tool_calls = false` or `parser = None`, the local adapter
-refuses tool-aware mode and the loop falls back to the existing
-text-only chat path. The model picker should mark tool-capable models
-in the UI; this gating is a runtime safety net.
+If `apply_chat_template_with_tools_oaicompat` returns `parse_tool_calls = false` or `parser = None`, the local adapter refuses tool-aware mode and the loop falls back to the existing text-only chat path. The model picker should mark tool-capable models in the UI; this gating is a runtime safety net.
 
 ## Tauri surface
 
@@ -382,23 +366,19 @@ Minimal surface to keep the UI almost-invisible:
 | `agent-stats` | `StreamStats` | Token counts, timing. Same shape as today's `chat-stats`. |
 | `agent-done` | `String` | Final assistant text. Loop terminated. |
 
-The pill UI is the only required new visual element. Trace expansion
-(showing every tool call's args + result inline) is a Phase 2 polish.
+The pill UI is the only required new visual element. Trace expansion (showing every tool call's args + result inline) is a Phase 2 polish.
 
 ## Cancellation
 
 Reuses the existing `AtomicBool` pattern from `LlmState`.
 
-- The cancel flag is checked at the top of each loop iteration, before
-  starting a stream, and on every delta consumed.
-- Cloud streams: aborting the HTTP request is the simplest path; can
-  also just stop reading and let the client drop.
-- Local streams: the worker thread already polls the cancel flag
-  between decode steps. The adapter closes its receiving end of the
-  delta channel; the worker observes channel-disconnect and bails.
-- Mid-tool-call cancellation: documented as a known edge case (see
-  `local_tool_calling.md` "Open items"). A partial tool call is dropped;
-  the loop returns `AgentOutcome::Cancelled` without dispatching it.
+- The cancel flag is checked at the top of each loop iteration, before starting a stream, and on every delta consumed.
+
+- Cloud streams: aborting the HTTP request is the simplest path; can also just stop reading and let the client drop.
+
+- Local streams: the worker thread already polls the cancel flag between decode steps. The adapter closes its receiving end of the delta channel; the worker observes channel-disconnect and bails.
+
+- Mid-tool-call cancellation: documented as a known edge case (see `local_tool_calling.md` "Open items"). A partial tool call is dropped; the loop returns `AgentOutcome::Cancelled` without dispatching it.
 
 ## Confirmation flow
 
@@ -420,68 +400,52 @@ async fn ask(app: &AppHandle, call: &ToolCall) -> Result<bool> {
 }
 ```
 
-"Remember this tool for this session" is intentionally deferred to a
-later phase. v1 prompts on every destructive call. Persisted
-always-allow is out of scope until the threat model is clearer.
+"Remember this tool for this session" is intentionally deferred to a later phase. v1 prompts on every destructive call. Persisted always-allow is out of scope until the threat model is clearer.
 
 ## Decisions
 
-The following calls have been made; the rest of this document assumes
-them.
+The following calls have been made; the rest of this document assumes them.
 
-1. **Tool-call persistence**: persist tool calls and their results
-   alongside the assistant turn. UI shows a collapsed pill by default;
-   the user can expand to see args + result. Very large tool_result
-   payloads are truncated when persisted.
-2. **Tool selection**: all registered tools are available in every
-   conversation. No tool-set picker. Destructive tools are gated by
-   per-call confirmation (#3) so accidents are bounded.
-3. **Confirmation granularity**: per-call. Every invocation of a tool
-   with `requires_confirmation() == true` blocks on a UI prompt.
-   "Remember per session" is deferred to a later phase.
-4. **Thinking-block UI**: hidden by default. While thinking deltas
-   stream, the UI shows an active "Thinking..." indicator. When the
-   thinking block closes, the indicator becomes a collapsible
-   "Show reasoning" toggle that reveals the buffered content on
-   demand.
-5. **Tool-arg streaming**: pill appears on `ToolCallStart` with the
-   tool name and a running spinner. Argument fragments are NOT
-   rendered live. After dispatch, the pill shows ok/error status; the
-   user can expand to see full args + result.
-6. **Local worker reuse**: extend the existing worker thread with a
-   new tool-aware `WorkerRequest` variant. The current `Chat` variant
-   stays untouched. Same `LlamaContext`, same KV-cache reuse, same
-   Metal-teardown discipline.
-7. **Cloud `usage` opt-in**: include
-   `stream_options.include_usage = true` and emit one `agent-stats`
-   event per turn. Carries forward the existing `chat-stats` pattern.
+1. **Tool-call persistence**: persist tool calls and their results alongside the assistant turn. UI shows a collapsed pill by default; the user can expand to see args + result. Very large tool_result payloads are truncated when persisted.
+
+2. **Tool selection**: all registered tools are available in every conversation. No tool-set picker. Destructive tools are gated by per-call confirmation (#3) so accidents are bounded.
+
+3. **Confirmation granularity**: per-call. Every invocation of a tool with `requires_confirmation() == true` blocks on a UI prompt. "Remember per session" is deferred to a later phase.
+
+4. **Thinking-block UI**: hidden by default. While thinking deltas stream, the UI shows an active "Thinking..." indicator. When the thinking block closes, the indicator becomes a collapsible "Show reasoning" toggle that reveals the buffered content on demand.
+
+5. **Tool-arg streaming**: pill appears on `ToolCallStart` with the tool name and a running spinner. Argument fragments are NOT rendered live. After dispatch, the pill shows ok/error status; the user can expand to see full args + result.
+
+6. **Local worker reuse**: extend the existing worker thread with a new tool-aware `WorkerRequest` variant. The current `Chat` variant stays untouched. Same `LlamaContext`, same KV-cache reuse, same Metal-teardown discipline.
+
+7. **Cloud `usage` opt-in**: include `stream_options.include_usage = true` and emit one `agent-stats` event per turn. Carries forward the existing `chat-stats` pattern.
 
 ## Phasing
 
 A reasonable build order, each step independently reviewable:
 
-1. `tool.rs` + `delta.rs` + a tiny `ToolRegistry`. No loop yet. Unit
-   tests for schema generation and arg parsing.
-2. `cloud.rs` + `loop_.rs`. Wire to a Tauri command. Test end-to-end
-   against OpenRouter (same path as today's prototype, just inside the
-   real module).
-3. `local.rs`. Reuse the existing worker thread; gate on
-   `parse_tool_calls = true`. Test against Qwen 3 4B.
-4. First real tools: `file_read`, `glob`, `web_fetch` (no
-   confirmation). Validate the registry composition.
-5. `confirm.rs` + the dialog UI. Add `shell_exec` as the first
-   destructive tool.
-6. UI polish: tool pills, thinking-block rendering, optional trace
-   expansion.
+1. `tool.rs` + `delta.rs` + a tiny `ToolRegistry`. No loop yet. Unit tests for schema generation and arg parsing.
+
+2. `cloud.rs` + `loop_.rs`. Wire to a Tauri command. Test end-to-end against OpenRouter (same path as today's prototype, just inside the real module).
+
+3. `local.rs`. Reuse the existing worker thread; gate on `parse_tool_calls = true`. Test against Qwen 3 4B.
+
+4. First real tools: `file_read`, `glob`, `web_fetch` (no confirmation). Validate the registry composition.
+
+5. `confirm.rs` + the dialog UI. Add `shell_exec` as the first destructive tool.
+
+6. UI polish: tool pills, thinking-block rendering, optional trace expansion.
 
 ## What this design intentionally does not do
 
 - No multi-agent orchestration. Single agent only.
-- No native Anthropic / Gemini clients. OpenAI-compat covers all four
-  current providers.
+
+- No native Anthropic / Gemini clients. OpenAI-compat covers all four current providers.
+
 - No vector store or RAG abstraction. Out of scope for v1.
+
 - No grammar-constrained local sampling. Skipped until upstream fix.
-- No DAG / tool-composition runtime. Tools are leaf functions; the
-  model orchestrates.
-- No framework adoption (rig, AutoAgents). Revisit when a feature
-  request demands it.
+
+- No DAG / tool-composition runtime. Tools are leaf functions; the model orchestrates.
+
+- No framework adoption (rig, AutoAgents). Revisit when a feature request demands it.
